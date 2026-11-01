@@ -129,3 +129,216 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
     )
+
+# ==========================================
+# CYVANTA MISSION CONTROLLER MODELS
+# ==========================================
+
+from sqlalchemy import Integer, Text
+
+
+class Mission(Base):
+    __tablename__ = "missions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), nullable=False
+    )
+
+    asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assets.id"), nullable=True
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(200), nullable=False
+    )
+
+    objective: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+
+    priority: Mapped[str] = mapped_column(
+        String(20), default="normal", nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30), default="planned", nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class MissionTask(Base):
+    __tablename__ = "mission_tasks"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    mission_id: Mapped[str] = mapped_column(
+        ForeignKey("missions.id"), nullable=False, index=True
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(200), nullable=False
+    )
+
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+
+    assigned_agent: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30), default="pending", nullable=False
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
+class ActionRequest(Base):
+    __tablename__ = "action_requests"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    mission_id: Mapped[str] = mapped_column(
+        ForeignKey("missions.id"), nullable=False, index=True
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False, index=True
+    )
+
+    requested_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), nullable=False
+    )
+
+    action_type: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+
+    target_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )
+
+    target_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
+
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+
+    risk_level: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30), default="pending_approval", nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
+class ActionApproval(Base):
+    __tablename__ = "action_approvals"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "action_request_id",
+            name="uq_action_approval",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    action_request_id: Mapped[str] = mapped_column(
+        ForeignKey("action_requests.id"), nullable=False
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False
+    )
+
+    decided_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), nullable=False
+    )
+
+    decision: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )
+
+    reason: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+
+class ExecutionRecord(Base):
+    __tablename__ = "execution_records"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    action_request_id: Mapped[str] = mapped_column(
+        ForeignKey("action_requests.id"), nullable=False, index=True
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30), default="queued", nullable=False
+    )
+
+    result: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+
+    verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
