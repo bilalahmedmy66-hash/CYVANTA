@@ -1,19 +1,18 @@
-﻿from fastapi import FastAPI
-from pydantic import BaseModel
+﻿from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
 
 from app.core.config import settings
+from app.database.base import Base
+from app.database.session import engine
+from app import models
+from app.api import auth, assets
 
 
-class HealthResponse(BaseModel):
-    status: str
-    service: str
-    version: str
-
-
-class SystemInfoResponse(BaseModel):
-    application: str
-    version: str
-    environment: str
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
 
 
 app = FastAPI(
@@ -22,7 +21,12 @@ app = FastAPI(
     version=settings.app_version,
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
+
+
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(assets.router, prefix="/api/v1")
 
 
 @app.get("/", tags=["System"])
@@ -34,27 +38,19 @@ def root():
     }
 
 
-@app.get(
-    "/api/v1/health",
-    response_model=HealthResponse,
-    tags=["System"],
-)
+@app.get("/api/v1/health", tags=["System"])
 def health_check():
-    return HealthResponse(
-        status="ok",
-        service=settings.app_name,
-        version=settings.app_version,
-    )
+    return {
+        "status": "ok",
+        "service": settings.app_name,
+        "version": settings.app_version,
+    }
 
 
-@app.get(
-    "/api/v1/system/info",
-    response_model=SystemInfoResponse,
-    tags=["System"],
-)
+@app.get("/api/v1/system/info", tags=["System"])
 def system_info():
-    return SystemInfoResponse(
-        application=settings.app_name,
-        version=settings.app_version,
-        environment=settings.app_env,
-    )
+    return {
+        "application": settings.app_name,
+        "version": settings.app_version,
+        "environment": settings.app_env,
+    }
