@@ -313,3 +313,127 @@ def test_execution_record_is_hidden_from_other_organization(api_context):
         headers=headers_two,
     )
     assert detail.status_code == 404
+
+def add_second_organization(session_factory, first_email):
+    from app.models import User, Organization, Membership
+
+    with session_factory() as db:
+        first_user = db.query(User).filter(
+            User.email == first_email
+        ).first()
+        second_user = db.query(User).filter(
+            User.email == "other-organization@example.com"
+        ).first()
+
+        assert first_user is not None
+        assert second_user is not None
+
+        second_membership = db.query(Membership).filter(
+            Membership.user_id == second_user.id
+        ).first()
+        assert second_membership is not None
+
+        first_membership = db.query(Membership).filter(
+            Membership.user_id == first_user.id
+        ).first()
+        assert first_membership is not None
+
+        second_org_id = second_membership.organization_id
+        first_org_id = first_membership.organization_id
+
+        db.add(
+            Membership(
+                user_id=first_user.id,
+                organization_id=second_org_id,
+                role="member",
+            )
+        )
+        db.commit()
+
+        return first_org_id, second_org_id
+
+
+def test_multiple_organizations_require_explicit_header(api_context):
+    client = api_context["client"]
+
+    first_headers = setup_account(client)
+    setup_account(
+        client,
+        email="other-organization@example.com",
+    )
+
+    add_second_organization(
+        api_context["session_factory"],
+        "execution@example.com",
+    )
+
+    response = client.get(
+        "/api/v1/executions",
+        headers=first_headers,
+    )
+
+    assert response.status_code == 400
+    assert "X-Organization-ID" in response.json()["detail"]
+
+
+def test_valid_organization_header_is_accepted(api_context):
+    client = api_context["client"]
+
+    first_headers = setup_account(client)
+    setup_account(
+        client,
+        email="other-organization@example.com",
+    )
+
+    first_org_id, second_org_id = add_second_organization(
+        api_context["session_factory"],
+        "execution@example.com",
+    )
+
+    headers_first = {
+        **first_headers,
+        "X-Organization-ID": first_org_id,
+    }
+    headers_second = {
+        **first_headers,
+        "X-Organization-ID": second_org_id,
+    }
+
+    first_response = client.get(
+        "/api/v1/executions",
+        headers=headers_first,
+    )
+    second_response = client.get(
+        "/api/v1/executions",
+        headers=headers_second,
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+
+
+def test_invalid_organization_header_is_rejected(api_context):
+    client = api_context["client"]
+
+    first_headers = setup_account(client)
+    setup_account(
+        client,
+        email="other-organization@example.com",
+    )
+
+    add_second_organization(
+        api_context["session_factory"],
+        "execution@example.com",
+    )
+
+    invalid_headers = {
+        **first_headers,
+        "X-Organization-ID": "organization-user-does-not-belong-to",
+    }
+
+    response = client.get(
+        "/api/v1/executions",
+        headers=invalid_headers,
+    )
+
+    assert response.status_code == 403

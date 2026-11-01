@@ -54,17 +54,38 @@ def get_current_membership(
         Membership.user_id == user.id
     )
 
-    if organization_id:
-        query = query.filter(
-            Membership.organization_id == organization_id
-        )
+    memberships = query.all()
 
-    membership = query.first()
-
-    if membership is None:
+    if not memberships:
         raise HTTPException(
             status_code=403,
-            detail="You do not belong to this organization.",
+            detail="You do not belong to any organization.",
         )
 
-    return membership
+    if organization_id:
+        membership = next(
+            (
+                item for item in memberships
+                if item.organization_id == organization_id
+            ),
+            None,
+        )
+
+        if membership is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not belong to this organization.",
+            )
+
+        return membership
+
+    if len(memberships) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "X-Organization-ID header is required "
+                "when you belong to multiple organizations."
+            ),
+        )
+
+    return memberships[0]
