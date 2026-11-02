@@ -805,3 +805,134 @@ def test_lifecycle_history_is_append_only(client):
         assert preserved.reason == "Authorization request submitted."
     finally:
         db_generator.close()
+
+
+def test_reactivation_writes_lifecycle_event_and_audit_record(client):
+    owner_headers, reviewer_headers, asset_id, authorization_id = (
+        create_verified_authorization(client)
+    )
+
+    suspended = lifecycle_request(
+        client, reviewer_headers, authorization_id, "suspend"
+    )
+    assert suspended.status_code == 200, suspended.text
+
+    reason = "Reactivation audit verification."
+    reactivated = lifecycle_request(
+        client,
+        reviewer_headers,
+        authorization_id,
+        "reactivate",
+        reason=reason,
+    )
+
+    assert reactivated.status_code == 200, reactivated.text
+    assert reactivated.json()["status"] == "verified"
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+
+    try:
+        event = db.query(AuthorizationLifecycleEvent).filter(
+            AuthorizationLifecycleEvent.authorization_id == authorization_id,
+            AuthorizationLifecycleEvent.event_type == "reactivated",
+        ).first()
+
+        audit = db.query(AuditLog).filter(
+            AuditLog.target_id == authorization_id,
+            AuditLog.action == "asset_authorization.reactivated",
+        ).first()
+
+        assert event is not None
+        assert audit is not None
+
+        assert event.actor_id is not None
+        assert event.organization_id is not None
+        assert event.reason == reason
+        assert event.details["previous_status"] == "suspended"
+        assert event.details["new_status"] == "verified"
+
+        assert audit.user_id == event.actor_id
+        assert audit.organization_id == event.organization_id
+        assert audit.target_type == "asset_authorization"
+        assert audit.details["previous_status"] == "suspended"
+        assert audit.details["new_status"] == "verified"
+        assert audit.details["reason"] == reason
+        assert audit.details["assessment_enabled"] is False
+    finally:
+        db_generator.close()
+
+
+def test_other_organization_cannot_change_asset_authorization_lifecycle(client):
+    owner_headers, reviewer_headers, asset_id, authorization_id = (
+        create_verified_authorization(client)
+    )
+
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "other-organization@example.com",
+            "password": "StrongPassphrase123!",
+            "organization_name": "Separate Security Test Organization",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "other-organization@example.com",
+            "password": "StrongPassphrase123!",
+        },
+    )
+    assert login.status_code == 200, login.text
+
+    other_organization_headers = {
+        "Authorization": f"Bearer {login.json()['access_token']}"
+    }
+
+    for action in ("suspend", "reactivate", "revoke"):
+        response = lifecycle_request(
+            client,
+            other_organization_headers,
+            authorization_id,
+            action,
+        )
+        assert response.status_code == 404, (
+            f"{action} should be hidden from another organization. "
+            f"Received {response.status_code}: {response.text}"
+        )
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+
+    try:
+        authorization = db.query(AssetAuthorization).filter(
+            AssetAuthorization.id == authorization_id
+        ).first()
+
+        assert authorization is not None
+        assert authorization.status == "verified"
+
+        forbidden_events = db.query(AuthorizationLifecycleEvent).filter(
+            AuthorizationLifecycleEvent.authorization_id == authorization_id,
+            AuthorizationLifecycleEvent.event_type.in_(
+                ("suspended", "reactivated", "revoked")
+            ),
+        ).count()
+
+        forbidden_audits = db.query(AuditLog).filter(
+            AuditLog.target_id == authorization_id,
+            AuditLog.action.in_(
+                (
+                    "asset_authorization.suspended",
+                    "asset_authorization.reactivated",
+                    "asset_authorization.revoked",
+                )
+            ),
+        ).count()
+
+        assert forbidden_events == 0
+        assert forbidden_audits == 0
+    finally:
+        db_generator.close()
