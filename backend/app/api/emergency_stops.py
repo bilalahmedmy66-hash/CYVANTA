@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -173,4 +173,3 @@ def deactivate_emergency_stop(
     db.refresh(state)
 
     return emergency_stop_response(state)
-
