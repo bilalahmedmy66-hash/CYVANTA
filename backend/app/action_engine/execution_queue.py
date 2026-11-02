@@ -1,8 +1,15 @@
-﻿from app.models import ExecutionRecord
+from app.models import ExecutionRecord
 from app.action_engine.policy import evaluate_action_policy
 
 
-def enqueue_action(db, action, asset, approval, emergency_stop=False):
+def enqueue_action(
+    db,
+    action,
+    asset,
+    approval,
+    emergency_stop=False,
+    authorization=None,
+):
     """
     Create a queued execution record after policy validation.
 
@@ -13,6 +20,7 @@ def enqueue_action(db, action, asset, approval, emergency_stop=False):
         action=action,
         asset=asset,
         approval=approval,
+        authorization=authorization,
         emergency_stop=emergency_stop,
     )
 

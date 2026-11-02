@@ -8,7 +8,9 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.database.base import Base
 from app.database.session import get_db
-from app.models import Asset, Membership
+from datetime import datetime, timedelta, timezone
+
+from app.models import Asset, AssetAuthorization, Membership
 
 
 @pytest.fixture
@@ -95,8 +97,31 @@ def verify_asset(session_factory, asset_id):
         ).first()
 
         assert asset is not None
+
+        now = datetime.now(timezone.utc)
+
+        authorization = AssetAuthorization(
+            organization_id=asset.organization_id,
+            asset_id=asset.id,
+            status="verified",
+            submitted_by=asset.created_by,
+            reviewed_by=asset.created_by,
+            evidence_type="authorization_letter",
+            evidence_reference="TEST-EVIDENCE-REFERENCE",
+            scope={
+                "domains": [asset.identifier],
+                "ip_addresses": [],
+                "excluded_targets": [],
+                "allowed_assessment_types": ["collect_inventory"],
+            },
+            valid_from=now - timedelta(minutes=1),
+            expires_at=now + timedelta(days=30),
+            reviewed_at=now,
+        )
+
         asset.authorization_status = "verified"
         asset.assessment_enabled = True
+        db.add(authorization)
         db.commit()
 
 

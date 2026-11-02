@@ -6,6 +6,7 @@ from app.models import (
     ActionRequest,
     ActionApproval,
     Asset,
+    AssetAuthorization,
     ExecutionRecord,
     AuditLog,
     User,
@@ -65,6 +66,12 @@ def queue_action(
     if action is None:
         raise HTTPException(status_code=404, detail="Action not found.")
 
+    if action.target_type != "asset":
+        raise HTTPException(
+            status_code=409,
+            detail="Only asset-targeted actions may enter this queue.",
+        )
+
     approval = db.query(ActionApproval).filter(
         ActionApproval.action_request_id == action.id,
         ActionApproval.organization_id == membership.organization_id,
@@ -80,6 +87,20 @@ def queue_action(
             status_code=404,
             detail="Target asset not found in this organization.",
         )
+
+    authorization = (
+        db.query(AssetAuthorization)
+        .filter(
+            AssetAuthorization.asset_id == asset.id,
+            AssetAuthorization.organization_id == membership.organization_id,
+            AssetAuthorization.status == "verified",
+        )
+        .order_by(
+            AssetAuthorization.reviewed_at.desc(),
+            AssetAuthorization.created_at.desc(),
+        )
+        .first()
+    )
 
     try:
         emergency_stop = is_emergency_stop_active(
@@ -98,10 +119,11 @@ def queue_action(
             action=action,
             asset=asset,
             approval=approval,
+            authorization=authorization,
             emergency_stop=emergency_stop,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     db.add(
         AuditLog(
@@ -114,6 +136,7 @@ def queue_action(
                 "action_request_id": action.id,
                 "action_type": action.action_type,
                 "execution_started": False,
+                "authorization_id": authorization.id if authorization else None,
             },
             ip_address=request.client.host if request.client else None,
         )
