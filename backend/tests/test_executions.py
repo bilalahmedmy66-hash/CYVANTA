@@ -539,3 +539,201 @@ def test_unavailable_emergency_stop_state_blocks_queue(
 
     assert listing.status_code == 200
     assert listing.json() == []
+
+
+def test_real_authorization_api_flow_reaches_queue_only(api_context):
+    """Exercise real authorization and action APIs; never execute an operation."""
+    from app.models import AuditLog, User
+
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    # 1. Register the organization owner and an asset through the API.
+    owner_headers = setup_account(client)
+    asset_id = setup_asset(client, owner_headers)
+
+    # 2. Submit an actual authorization request through the API.
+    now = datetime.now(timezone.utc)
+    authorization_payload = {
+        "evidence_type": "authorization_letter",
+        "evidence_reference": "INTEGRATION-TEST-EVIDENCE-001",
+        "scope": {
+            "domains": ["execution-server.local"],
+            "ip_addresses": [],
+            "excluded_targets": [],
+            "allowed_assessment_types": ["collect_inventory"],
+        },
+        "valid_from": (now - timedelta(minutes=1)).isoformat(),
+        "expires_at": (now + timedelta(days=30)).isoformat(),
+    }
+
+    submitted = client.post(
+        f"/api/v1/assets/{asset_id}/authorizations",
+        headers=owner_headers,
+        json=authorization_payload,
+    )
+    assert submitted.status_code == 201, submitted.text
+    authorization_id = submitted.json()["id"]
+
+    # 3. Create a separate reviewer account and move its membership
+    # into the owner's organization using this isolated test database.
+    reviewer_registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "execution-reviewer@example.com",
+            "password": "StrongPassphrase123!",
+            "organization_name": "Temporary Reviewer Organization",
+        },
+    )
+    assert reviewer_registration.status_code == 201, reviewer_registration.text
+
+    reviewer_login = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "execution-reviewer@example.com",
+            "password": "StrongPassphrase123!",
+        },
+    )
+    assert reviewer_login.status_code == 200, reviewer_login.text
+
+    with session_factory() as db:
+        owner = db.query(User).filter(
+            User.email == "execution@example.com"
+        ).first()
+        reviewer = db.query(User).filter(
+            User.email == "execution-reviewer@example.com"
+        ).first()
+
+        assert owner is not None
+        assert reviewer is not None
+
+        owner_membership = db.query(Membership).filter(
+            Membership.user_id == owner.id
+        ).first()
+        reviewer_memberships = db.query(Membership).filter(
+            Membership.user_id == reviewer.id
+        ).all()
+
+        assert owner_membership is not None
+        assert len(reviewer_memberships) == 1
+
+        for membership in reviewer_memberships:
+            db.delete(membership)
+
+        db.add(
+            Membership(
+                user_id=reviewer.id,
+                organization_id=owner_membership.organization_id,
+                role="admin",
+            )
+        )
+        db.commit()
+
+    reviewer_headers = {
+        "Authorization": f"Bearer {reviewer_login.json()['access_token']}"
+    }
+
+    # 4. The independent admin approves the actual authorization request.
+    authorization_decision = client.post(
+        f"/api/v1/assets/authorizations/{authorization_id}/decision",
+        headers=reviewer_headers,
+        json={
+            "decision": "approve",
+            "reason": "Integration test: authorization evidence reviewed.",
+        },
+    )
+    assert authorization_decision.status_code == 200, authorization_decision.text
+    assert authorization_decision.json()["status"] == "verified"
+
+    # Authorization approval must not enable assessments.
+    with session_factory() as db:
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        assert asset is not None
+        assert asset.authorization_status == "verified"
+        assert asset.assessment_enabled is False
+
+    # 5. Create a mission and propose an action through the real APIs.
+    mission_response = client.post(
+        "/api/v1/missions",
+        headers=owner_headers,
+        json={
+            "title": "Authorization Integration Test",
+            "objective": "Verify the controlled queue integration.",
+            "priority": "normal",
+            "asset_id": asset_id,
+        },
+    )
+    assert mission_response.status_code == 201, mission_response.text
+    mission_id = mission_response.json()["id"]
+
+    proposal = client.post(
+        f"/api/v1/missions/{mission_id}/actions",
+        headers=owner_headers,
+        json={
+            "action_type": "collect_inventory",
+            "target_id": asset_id,
+            "description": "Test-only inventory action proposal.",
+        },
+    )
+    assert proposal.status_code == 201, proposal.text
+    action_id = proposal.json()["id"]
+
+    # The separate admin also approves the action.
+    action_decision = client.post(
+        f"/api/v1/actions/{action_id}/decision",
+        headers=reviewer_headers,
+        json={
+            "decision": "approve",
+            "reason": "Integration test: action reviewed.",
+        },
+    )
+    assert action_decision.status_code == 200, action_decision.text
+
+    # 6. Verified authorization alone is insufficient:
+    # the independent assessment-enabled gate must still block queueing.
+    blocked = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=owner_headers,
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    execution_listing = client.get(
+        "/api/v1/executions",
+        headers=owner_headers,
+    )
+    assert execution_listing.status_code == 200
+    assert execution_listing.json() == []
+
+    # Test fixture only: simulate the separate assessment-enable control.
+    # This is NOT an application API or a claim that such an API exists.
+    with session_factory() as db:
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        assert asset is not None
+        asset.assessment_enabled = True
+        db.commit()
+
+    # 7. The action may now enter the queue, but must not execute.
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=owner_headers,
+    )
+    assert queued.status_code == 201, queued.text
+
+    execution = queued.json()
+    assert execution["action_request_id"] == action_id
+    assert execution["status"] == "queued"
+    assert execution["verified"] is False
+    assert execution["result"]["mode"] == "queued_only"
+    assert execution["result"]["execution_started"] is False
+
+    # 8. Verify that the execution audit record references the real
+    # authorization approved earlier in this same API workflow.
+    with session_factory() as db:
+        audit = db.query(AuditLog).filter(
+            AuditLog.action == "execution.queued",
+            AuditLog.target_id == execution["id"],
+        ).first()
+
+        assert audit is not None
+        assert audit.details["authorization_id"] == authorization_id
+        assert audit.details["execution_started"] is False
