@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -16,6 +16,10 @@ from app.security.dependencies import (
     get_current_membership,
 )
 from app.action_engine.execution_queue import enqueue_action
+from app.action_engine.emergency_stop import (
+    is_emergency_stop_active,
+    EmergencyStopStateUnavailable,
+)
 
 
 router = APIRouter(tags=["Execution Engine"])
@@ -78,12 +82,23 @@ def queue_action(
         )
 
     try:
+        emergency_stop = is_emergency_stop_active(
+            db=db,
+            organization_id=membership.organization_id,
+        )
+    except EmergencyStopStateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Execution queue unavailable because Emergency Stop state could not be verified.",
+        ) from exc
+
+    try:
         record = enqueue_action(
             db=db,
             action=action,
             asset=asset,
             approval=approval,
-            emergency_stop=False,
+            emergency_stop=emergency_stop,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

@@ -437,3 +437,80 @@ def test_invalid_organization_header_is_rejected(api_context):
     )
 
     assert response.status_code == 403
+
+
+def test_active_emergency_stop_blocks_new_queue_request(api_context):
+    client = api_context["client"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    activation = client.post(
+        "/api/v1/emergency-stop/activate",
+        headers=headers,
+        json={
+            "reason": "Testing execution queue emergency stop."
+        },
+    )
+
+    assert activation.status_code == 200
+    assert activation.json()["is_active"] is True
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "Emergency stop is active" in response.json()["detail"]
+
+    listing = client.get(
+        "/api/v1/executions",
+        headers=headers,
+    )
+
+    assert listing.status_code == 200
+    assert listing.json() == []
+
+
+def test_unavailable_emergency_stop_state_blocks_queue(
+    api_context,
+    monkeypatch,
+):
+    from app.action_engine.emergency_stop import (
+        EmergencyStopStateUnavailable,
+    )
+    import app.api.executions as execution_api
+
+    client = api_context["client"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    def simulate_unavailable_state(*args, **kwargs):
+        raise EmergencyStopStateUnavailable(
+            "Emergency Stop state could not be verified."
+        )
+
+    monkeypatch.setattr(
+        execution_api,
+        "is_emergency_stop_active",
+        simulate_unavailable_state,
+    )
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert (
+        "Emergency Stop state could not be verified"
+        in response.json()["detail"]
+    )
+
+    listing = client.get(
+        "/api/v1/executions",
+        headers=headers,
+    )
+
+    assert listing.status_code == 200
+    assert listing.json() == []

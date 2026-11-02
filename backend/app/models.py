@@ -342,3 +342,45 @@ class ExecutionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
     )
+
+
+# ==========================================
+# CYVANTA EMERGENCY STOP MODEL
+# ==========================================
+
+class EmergencyStopState(Base):
+    __tablename__ = "emergency_stop_states"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+
+    changed_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
