@@ -18,6 +18,7 @@ from app.security.dependencies import (
     get_current_membership,
 )
 from app.action_engine.execution_queue import enqueue_action
+from app.action_engine.execution_lifecycle import transition_execution
 from app.action_engine.emergency_stop import (
     is_emergency_stop_active,
     EmergencyStopStateUnavailable,
@@ -186,6 +187,68 @@ def queue_action(
                 ip_address=request.client.host if request.client else None,
             )
         )
+    db.commit()
+    db.refresh(record)
+
+    return execution_response(record)
+
+
+@router.post("/api/v1/executions/{execution_id}/cancel")
+def cancel_execution(
+    execution_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    membership: Membership = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    require_admin(membership)
+
+    record = (
+        db.query(ExecutionRecord)
+        .filter(
+            ExecutionRecord.id == execution_id,
+            ExecutionRecord.organization_id == membership.organization_id,
+        )
+        .first()
+    )
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Execution record not found.",
+        )
+
+    previous_status = record.status
+
+    try:
+        record = transition_execution(
+            db=db,
+            execution_id=record.id,
+            target_status="cancelled",
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            organization_id=membership.organization_id,
+            action="execution.cancelled",
+            target_type="execution_record",
+            target_id=record.id,
+            details={
+                "previous_status": previous_status,
+                "new_status": "cancelled",
+                "execution_started": False,
+            },
+            ip_address=request.client.host if request.client else None,
+        )
+    )
+
     db.commit()
     db.refresh(record)
 

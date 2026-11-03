@@ -10,7 +10,7 @@ from app.database.base import Base
 from app.database.session import get_db
 from datetime import datetime, timedelta, timezone
 
-from app.models import Asset, AssetAuthorization, AuditLog, Membership
+from app.models import Asset, AssetAuthorization, AuditLog, Membership, ExecutionRecord
 
 
 @pytest.fixture
@@ -749,3 +749,151 @@ def test_real_authorization_api_flow_reaches_queue_only(api_context):
         assert audit is not None
         assert audit.details["authorization_id"] == authorization_id
         assert audit.details["execution_started"] is False
+
+
+def test_admin_can_cancel_queued_execution(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    response = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["started_at"] is None
+    assert response.json()["completed_at"] is not None
+
+    with session_factory() as db:
+        audits = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.action == "execution.cancelled",
+                AuditLog.target_id == execution_id,
+            )
+            .all()
+        )
+
+        assert len(audits) == 1
+        assert audits[0].details["previous_status"] == "queued"
+        assert audits[0].details["new_status"] == "cancelled"
+
+
+def test_non_admin_cannot_cancel_execution(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    with session_factory() as db:
+        membership = db.query(Membership).first()
+        assert membership is not None
+        membership.role = "member"
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+
+    with session_factory() as db:
+        record = db.query(ExecutionRecord).filter(
+            ExecutionRecord.id == execution_id
+        ).first()
+
+        assert record.status == "queued"
+
+
+def test_other_organization_cannot_cancel_execution(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers_one, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers_one,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    headers_two = setup_account(
+        client,
+        email="cancel-other-organization@example.com",
+    )
+
+    response = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers_two,
+    )
+
+    assert response.status_code == 404
+
+    with session_factory() as db:
+        record = db.query(ExecutionRecord).filter(
+            ExecutionRecord.id == execution_id
+        ).first()
+
+        assert record.status == "queued"
+
+
+def test_running_execution_cannot_be_cancelled(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    with session_factory() as db:
+        record = db.query(ExecutionRecord).filter(
+            ExecutionRecord.id == execution_id
+        ).first()
+
+        assert record is not None
+        record.status = "running"
+        record.started_at = datetime.now(timezone.utc)
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+
+    with session_factory() as db:
+        record = db.query(ExecutionRecord).filter(
+            ExecutionRecord.id == execution_id
+        ).first()
+
+        assert record.status == "running"
+        assert record.completed_at is None
