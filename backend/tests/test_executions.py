@@ -897,7 +897,7 @@ def test_running_execution_cannot_be_cancelled(api_context):
 
         assert record.status == "running"
         assert record.completed_at is None
-from app.models import ExecutionLifecycleEvent
+
 
 
 def test_duplicate_queue_creates_only_one_initial_lifecycle_event(api_context):
@@ -970,3 +970,122 @@ def test_cancellation_creates_lifecycle_event(api_context):
         assert events[1].from_status == "queued"
         assert events[1].to_status == "cancelled"
         assert events[1].actor_id is not None
+
+
+
+def test_execution_history_returns_chronological_events_and_pagination(api_context):
+    client = api_context["client"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    cancelled = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+
+    first_page = client.get(
+        f"/api/v1/executions/{execution_id}/events?limit=1&offset=0",
+        headers=headers,
+    )
+
+    second_page = client.get(
+        f"/api/v1/executions/{execution_id}/events?limit=1&offset=1",
+        headers=headers,
+    )
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+
+    first_data = first_page.json()
+    second_data = second_page.json()
+
+    assert first_data["execution_id"] == execution_id
+    assert first_data["total"] == 2
+    assert first_data["limit"] == 1
+    assert first_data["offset"] == 0
+    assert first_data["has_more"] is True
+
+    assert len(first_data["items"]) == 1
+    assert first_data["items"][0]["from_status"] is None
+    assert first_data["items"][0]["to_status"] == "queued"
+
+    assert second_data["total"] == 2
+    assert second_data["has_more"] is False
+    assert len(second_data["items"]) == 1
+    assert second_data["items"][0]["from_status"] == "queued"
+    assert second_data["items"][0]["to_status"] == "cancelled"
+
+
+def test_execution_history_is_hidden_from_other_organization(api_context):
+    client = api_context["client"]
+
+    headers_one, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers_one,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    headers_two = setup_account(client, email="history-other@example.com")
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/events",
+        headers=headers_two,
+    )
+
+    assert response.status_code == 404
+
+
+def test_execution_history_requires_authentication(api_context):
+    client = api_context["client"]
+
+    response = client.get(
+        "/api/v1/executions/unknown-execution/events"
+    )
+
+    assert response.status_code == 401
+
+
+def test_execution_history_rejects_invalid_pagination(api_context):
+    client = api_context["client"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    too_large = client.get(
+        f"/api/v1/executions/{execution_id}/events?limit=101",
+        headers=headers,
+    )
+
+    zero_limit = client.get(
+        f"/api/v1/executions/{execution_id}/events?limit=0",
+        headers=headers,
+    )
+
+    negative_offset = client.get(
+        f"/api/v1/executions/{execution_id}/events?offset=-1",
+        headers=headers,
+    )
+
+    assert too_large.status_code == 422
+    assert zero_limit.status_code == 422
+    assert negative_offset.status_code == 422

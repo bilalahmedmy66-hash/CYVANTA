@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -287,6 +287,70 @@ def list_executions(
     )
 
     return [execution_response(record) for record in records]
+
+
+
+@router.get("/api/v1/executions/{execution_id}/events")
+def list_execution_events(
+    execution_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    membership: Membership = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    # First verify that this execution belongs to the active organization.
+    record = db.query(ExecutionRecord).filter(
+        ExecutionRecord.id == execution_id,
+        ExecutionRecord.organization_id == membership.organization_id,
+    ).first()
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Execution record not found.",
+        )
+
+    events_query = db.query(ExecutionLifecycleEvent).filter(
+        ExecutionLifecycleEvent.execution_id == record.id,
+        ExecutionLifecycleEvent.organization_id == membership.organization_id,
+    )
+
+    total = events_query.count()
+
+    events = (
+        events_query
+        .order_by(
+            ExecutionLifecycleEvent.created_at.asc(),
+            ExecutionLifecycleEvent.id.asc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items = [
+        {
+            "id": event.id,
+            "execution_id": event.execution_id,
+            "organization_id": event.organization_id,
+            "event_type": event.event_type,
+            "actor_id": event.actor_id,
+            "from_status": event.from_status,
+            "to_status": event.to_status,
+            "details": event.details,
+            "created_at": event.created_at,
+        }
+        for event in events
+    ]
+
+    return {
+        "execution_id": record.id,
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(items) < total,
+    }
 
 
 @router.get("/api/v1/executions/{execution_id}")
