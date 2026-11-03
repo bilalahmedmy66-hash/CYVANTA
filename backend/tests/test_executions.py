@@ -10,7 +10,7 @@ from app.database.base import Base
 from app.database.session import get_db
 from datetime import datetime, timedelta, timezone
 
-from app.models import Asset, AssetAuthorization, AuditLog, Membership, ExecutionRecord
+from app.models import Asset, AssetAuthorization, AuditLog, Membership, ExecutionRecord, ExecutionLifecycleEvent
 
 
 @pytest.fixture
