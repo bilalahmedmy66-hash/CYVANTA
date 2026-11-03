@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -295,6 +296,11 @@ def list_execution_events(
     execution_id: str,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    event_type: str | None = Query(default=None, min_length=1, max_length=50),
+    status: str | None = Query(default=None, min_length=1, max_length=30),
+    actor_id: str | None = Query(default=None, min_length=1, max_length=36),
+    from_date: datetime | None = Query(default=None),
+    to_date: datetime | None = Query(default=None),
     membership: Membership = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ):
@@ -314,6 +320,37 @@ def list_execution_events(
         ExecutionLifecycleEvent.execution_id == record.id,
         ExecutionLifecycleEvent.organization_id == membership.organization_id,
     )
+
+    if event_type is not None:
+        events_query = events_query.filter(
+            ExecutionLifecycleEvent.event_type == event_type
+        )
+
+    if status is not None:
+        events_query = events_query.filter(
+            ExecutionLifecycleEvent.to_status == status
+        )
+
+    if actor_id is not None:
+        events_query = events_query.filter(
+            ExecutionLifecycleEvent.actor_id == actor_id
+        )
+
+    if from_date is not None:
+        events_query = events_query.filter(
+            ExecutionLifecycleEvent.created_at >= from_date
+        )
+
+    if to_date is not None:
+        events_query = events_query.filter(
+            ExecutionLifecycleEvent.created_at <= to_date
+        )
+
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise HTTPException(
+            status_code=422,
+            detail="from_date must not be later than to_date.",
+        )
 
     total = events_query.count()
 
@@ -352,6 +389,83 @@ def list_execution_events(
         "has_more": offset + len(items) < total,
     }
 
+
+
+
+@router.get("/api/v1/executions/{execution_id}/summary")
+def get_execution_summary(
+    execution_id: str,
+    membership: Membership = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    record = db.query(ExecutionRecord).filter(
+        ExecutionRecord.id == execution_id,
+        ExecutionRecord.organization_id == membership.organization_id,
+    ).first()
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Execution record not found.",
+        )
+
+    events = (
+        db.query(ExecutionLifecycleEvent)
+        .filter(
+            ExecutionLifecycleEvent.execution_id == record.id,
+            ExecutionLifecycleEvent.organization_id == membership.organization_id,
+        )
+        .order_by(
+            ExecutionLifecycleEvent.created_at.asc(),
+            ExecutionLifecycleEvent.id.asc(),
+        )
+        .all()
+    )
+
+    event_counts = {}
+    for event in events:
+        event_counts[event.event_type] = (
+            event_counts.get(event.event_type, 0) + 1
+        )
+
+    first_event_at = events[0].created_at if events else None
+    last_event_at = events[-1].created_at if events else None
+
+    duration_seconds = None
+
+    if record.started_at is not None:
+        end_time = record.completed_at
+
+        if end_time is None:
+            end_time = datetime.now(timezone.utc)
+
+        start_time = record.started_at
+
+        if start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=timezone.utc)
+
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
+        duration_seconds = max(
+            0.0,
+            (end_time - start_time).total_seconds(),
+        )
+
+    return {
+        "execution_id": record.id,
+        "organization_id": record.organization_id,
+        "status": record.status,
+        "verified": record.verified,
+        "total_events": len(events),
+        "event_counts": event_counts,
+        "first_event_at": first_event_at,
+        "last_event_at": last_event_at,
+        "started_at": record.started_at,
+        "completed_at": record.completed_at,
+        "duration_seconds": duration_seconds,
+        "execution_started": record.started_at is not None,
+    }
 
 @router.get("/api/v1/executions/{execution_id}")
 def get_execution(

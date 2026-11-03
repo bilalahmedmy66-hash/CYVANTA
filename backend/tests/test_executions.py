@@ -1089,3 +1089,264 @@ def test_execution_history_rejects_invalid_pagination(api_context):
     assert too_large.status_code == 422
     assert zero_limit.status_code == 422
     assert negative_offset.status_code == 422
+
+
+
+def test_execution_history_filters_by_event_type_and_status(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    cancelled = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+
+    queued_events = client.get(
+        f"/api/v1/executions/{execution_id}/events?status=queued",
+        headers=headers,
+    )
+
+    cancelled_events = client.get(
+        f"/api/v1/executions/{execution_id}/events?status=cancelled",
+        headers=headers,
+    )
+
+    transition_events = client.get(
+        f"/api/v1/executions/{execution_id}/events?event_type=status_transition",
+        headers=headers,
+    )
+
+    assert queued_events.status_code == 200
+    assert cancelled_events.status_code == 200
+    assert transition_events.status_code == 200
+
+    assert queued_events.json()["total"] == 1
+    assert queued_events.json()["items"][0]["to_status"] == "queued"
+
+    assert cancelled_events.json()["total"] == 1
+    assert cancelled_events.json()["items"][0]["to_status"] == "cancelled"
+
+    assert transition_events.json()["total"] == 2
+
+
+def test_execution_history_filters_by_actor(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/events?actor_id=unknown-actor",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    assert response.json()["items"] == []
+
+
+def test_execution_history_rejects_reversed_date_range(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/events"
+        "?from_date=2026-11-03T12:00:00"
+        "&to_date=2026-11-02T12:00:00",
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
+def test_execution_summary_returns_lifecycle_overview(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/summary",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["execution_id"] == execution_id
+    assert data["status"] == "queued"
+    assert data["execution_started"] is False
+    assert data["started_at"] is None
+    assert data["completed_at"] is None
+    assert data["duration_seconds"] is None
+    assert data["total_events"] == 1
+    assert data["event_counts"]["status_transition"] == 1
+
+
+def test_execution_summary_includes_cancellation_history(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    cancelled = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/summary",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["status"] == "cancelled"
+    assert data["total_events"] == 2
+    assert data["event_counts"]["status_transition"] == 2
+    assert data["first_event_at"] is not None
+    assert data["last_event_at"] is not None
+
+
+def test_execution_summary_is_hidden_from_other_organization(api_context):
+    client = api_context["client"]
+    headers_one, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers_one,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    headers_two = setup_account(
+        client,
+        email="summary-other@example.com",
+    )
+
+    response = client.get(
+        f"/api/v1/executions/{execution_id}/summary",
+        headers=headers_two,
+    )
+
+    assert response.status_code == 404
+
+
+def test_execution_summary_requires_authentication(api_context):
+    client = api_context["client"]
+
+    response = client.get(
+        "/api/v1/executions/unknown-execution/summary"
+    )
+
+    assert response.status_code == 401
+
+
+
+def test_execution_history_filters_by_real_actor(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    all_events = client.get(
+        f"/api/v1/executions/{execution_id}/events",
+        headers=headers,
+    )
+    assert all_events.status_code == 200
+
+    actor_id = all_events.json()["items"][0]["actor_id"]
+    assert actor_id is not None
+
+    filtered = client.get(
+        f"/api/v1/executions/{execution_id}/events",
+        params={"actor_id": actor_id},
+        headers=headers,
+    )
+
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] >= 1
+    assert all(
+        item["actor_id"] == actor_id
+        for item in filtered.json()["items"]
+    )
+
+
+def test_execution_history_filters_by_inclusive_date_range(api_context):
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    all_events = client.get(
+        f"/api/v1/executions/{execution_id}/events",
+        headers=headers,
+    )
+    assert all_events.status_code == 200
+
+    event_timestamp = all_events.json()["items"][0]["created_at"]
+
+    filtered = client.get(
+        f"/api/v1/executions/{execution_id}/events",
+        params={
+            "from_date": event_timestamp,
+            "to_date": event_timestamp,
+        },
+        headers=headers,
+    )
+
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["created_at"] == event_timestamp
