@@ -897,3 +897,76 @@ def test_running_execution_cannot_be_cancelled(api_context):
 
         assert record.status == "running"
         assert record.completed_at is None
+from app.models import ExecutionLifecycleEvent
+
+
+def test_duplicate_queue_creates_only_one_initial_lifecycle_event(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    first = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    second = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+
+    with session_factory() as db:
+        events = (
+            db.query(ExecutionLifecycleEvent)
+            .filter(
+                ExecutionLifecycleEvent.execution_id == first.json()["id"]
+            )
+            .all()
+        )
+
+        assert len(events) == 1
+        assert events[0].from_status is None
+        assert events[0].to_status == "queued"
+        assert events[0].event_type == "status_transition"
+
+
+def test_cancellation_creates_lifecycle_event(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    queued = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+    assert queued.status_code == 201
+
+    execution_id = queued.json()["id"]
+
+    cancelled = client.post(
+        f"/api/v1/executions/{execution_id}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+
+    with session_factory() as db:
+        events = (
+            db.query(ExecutionLifecycleEvent)
+            .filter(
+                ExecutionLifecycleEvent.execution_id == execution_id
+            )
+            .order_by(ExecutionLifecycleEvent.created_at.asc())
+            .all()
+        )
+
+        assert len(events) == 2
+        assert events[0].from_status is None
+        assert events[0].to_status == "queued"
+        assert events[1].from_status == "queued"
+        assert events[1].to_status == "cancelled"
+        assert events[1].actor_id is not None

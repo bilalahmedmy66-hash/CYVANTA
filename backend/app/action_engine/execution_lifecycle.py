@@ -2,7 +2,7 @@
 
 from sqlalchemy import update
 
-from app.models import ExecutionRecord
+from app.models import ExecutionRecord, ExecutionLifecycleEvent
 
 
 ALLOWED_TRANSITIONS = {
@@ -17,7 +17,7 @@ ALLOWED_TRANSITIONS = {
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 
-def transition_execution(db, execution_id: str, target_status: str):
+def transition_execution(db, execution_id: str, target_status: str, actor_id: str | None = None):
     """
     Safely transition an execution record between permitted states.
 
@@ -71,6 +71,19 @@ def transition_execution(db, execution_id: str, target_status: str):
             "Execution state changed concurrently. Reload and retry."
         )
 
+    event = ExecutionLifecycleEvent(
+        organization_id=record.organization_id,
+        execution_id=record.id,
+        event_type="status_transition",
+        actor_id=actor_id,
+        from_status=current_status,
+        to_status=target_status,
+        details={
+            "execution_started": target_status == "running",
+        },
+    )
+
+    db.add(event)
     db.flush()
     db.refresh(record)
 

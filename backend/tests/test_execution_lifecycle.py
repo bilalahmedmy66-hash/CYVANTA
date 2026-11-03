@@ -158,3 +158,54 @@ def test_missing_execution_is_rejected(db_session):
             "missing-execution-id",
             "running",
         )
+from app.models import ExecutionLifecycleEvent
+
+
+def test_transition_creates_lifecycle_event_with_actor(db_session):
+    record = create_execution(db_session)
+    actor_id = "test-actor-001"
+
+    updated = transition_execution(
+        db_session,
+        record.id,
+        "running",
+        actor_id=actor_id,
+    )
+
+    events = (
+        db_session.query(ExecutionLifecycleEvent)
+        .filter(ExecutionLifecycleEvent.execution_id == record.id)
+        .all()
+    )
+
+    assert updated.status == "running"
+    assert len(events) == 1
+    assert events[0].organization_id == record.organization_id
+    assert events[0].actor_id == actor_id
+    assert events[0].from_status == "queued"
+    assert events[0].to_status == "running"
+    assert events[0].event_type == "status_transition"
+
+
+def test_rollback_reverts_transition_and_lifecycle_event(db_session):
+    record = create_execution(db_session)
+
+    transition_execution(
+        db_session,
+        record.id,
+        "running",
+        actor_id="test-actor-002",
+    )
+
+    db_session.rollback()
+    db_session.refresh(record)
+
+    events = (
+        db_session.query(ExecutionLifecycleEvent)
+        .filter(ExecutionLifecycleEvent.execution_id == record.id)
+        .all()
+    )
+
+    assert record.status == "queued"
+    assert record.started_at is None
+    assert events == []

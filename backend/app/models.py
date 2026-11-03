@@ -565,3 +565,61 @@ class AuthorizationLifecycleEvent(Base):
         nullable=False,
         index=True,
     )
+
+
+class ExecutionLifecycleEvent(Base):
+    """
+    Append-only history of execution state transitions.
+    """
+
+    __tablename__ = "execution_lifecycle_events"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=generate_id
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_records.id"),
+        nullable=False,
+        index=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    actor_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    from_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
+    to_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    details: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+        index=True,
+    )

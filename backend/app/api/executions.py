@@ -9,6 +9,7 @@ from app.models import (
     Asset,
     AssetAuthorization,
     ExecutionRecord,
+    ExecutionLifecycleEvent,
     AuditLog,
     User,
     Membership,
@@ -172,6 +173,21 @@ def queue_action(
 
     if created:
         db.add(
+            ExecutionLifecycleEvent(
+                organization_id=record.organization_id,
+                execution_id=record.id,
+                event_type="status_transition",
+                actor_id=user.id,
+                from_status=None,
+                to_status="queued",
+                details={
+                    "execution_started": False,
+                    "source": "execution_queue",
+                },
+            )
+        )
+
+        db.add(
             AuditLog(
                 user_id=user.id,
                 organization_id=membership.organization_id,
@@ -225,6 +241,7 @@ def cancel_execution(
             db=db,
             execution_id=record.id,
             target_status="cancelled",
+            actor_id=user.id,
         )
     except ValueError as exc:
         db.rollback()
