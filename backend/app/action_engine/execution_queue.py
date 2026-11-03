@@ -9,6 +9,7 @@ def enqueue_action(
     approval,
     emergency_stop=False,
     authorization=None,
+    return_created=False,
 ):
     """
     Create a queued execution record after policy validation.
@@ -34,6 +35,8 @@ def enqueue_action(
     )
 
     if existing is not None:
+        if return_created:
+            return existing, False
         return existing
 
     record = ExecutionRecord(
@@ -51,4 +54,6 @@ def enqueue_action(
     db.add(record)
     db.flush()
 
+    if return_created:
+        return record, True
     return record

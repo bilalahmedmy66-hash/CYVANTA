@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.database.session import get_db
 from app.models import (
@@ -24,6 +25,27 @@ from app.action_engine.emergency_stop import (
 
 
 router = APIRouter(tags=["Execution Engine"])
+
+def is_duplicate_execution_conflict(exc):
+    original = exc.orig
+
+    constraint_name = getattr(
+        getattr(original, "diag", None),
+        "constraint_name",
+        None,
+    )
+
+    if constraint_name == "uq_execution_action_request":
+        return True
+
+    error_name = getattr(original, "sqlite_errorname", None)
+    error_message = str(original)
+
+    return (
+        error_name == "SQLITE_CONSTRAINT_UNIQUE"
+        and "execution_records.action_request_id" in error_message
+    )
+
 
 
 def require_admin(membership):
@@ -113,6 +135,7 @@ def queue_action(
             detail="Execution queue unavailable because Emergency Stop state could not be verified.",
         ) from exc
 
+
     try:
         record = enqueue_action(
             db=db,
@@ -121,27 +144,48 @@ def queue_action(
             approval=approval,
             authorization=authorization,
             emergency_stop=emergency_stop,
+            return_created=True,
         )
+        record, created = record
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
 
-    db.add(
-        AuditLog(
-            user_id=user.id,
-            organization_id=membership.organization_id,
-            action="execution.queued",
-            target_type="execution_record",
-            target_id=record.id,
-            details={
-                "action_request_id": action.id,
-                "action_type": action.action_type,
-                "execution_started": False,
-                "authorization_id": authorization.id if authorization else None,
-            },
-            ip_address=request.client.host if request.client else None,
+        if not is_duplicate_execution_conflict(exc):
+            raise
+
+        record = (
+            db.query(ExecutionRecord)
+            .filter(
+                ExecutionRecord.action_request_id == action.id,
+                ExecutionRecord.organization_id == membership.organization_id,
+            )
+            .first()
         )
-    )
 
+        if record is None:
+            raise
+
+        created = False
+
+    if created:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                organization_id=membership.organization_id,
+                action="execution.queued",
+                target_type="execution_record",
+                target_id=record.id,
+                details={
+                    "action_request_id": action.id,
+                    "action_type": action.action_type,
+                    "execution_started": False,
+                    "authorization_id": authorization.id if authorization else None,
+                },
+                ip_address=request.client.host if request.client else None,
+            )
+        )
     db.commit()
     db.refresh(record)
 

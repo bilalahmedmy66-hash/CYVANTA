@@ -307,6 +307,13 @@ class ActionApproval(Base):
 class ExecutionRecord(Base):
     __tablename__ = "execution_records"
 
+    __table_args__ = (
+        UniqueConstraint(
+            "action_request_id",
+            name="uq_execution_action_request",
+        ),
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=generate_id
     )

@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -10,7 +10,7 @@ from app.database.base import Base
 from app.database.session import get_db
 from datetime import datetime, timedelta, timezone
 
-from app.models import Asset, AssetAuthorization, Membership
+from app.models import Asset, AssetAuthorization, AuditLog, Membership
 
 
 @pytest.fixture
@@ -265,6 +265,7 @@ def test_unknown_action_cannot_be_queued(api_context):
 
 def test_duplicate_queue_request_returns_same_record(api_context):
     client = api_context["client"]
+    session_factory = api_context["session_factory"]
 
     headers, action_id = prepare_approved_action(api_context)
 
@@ -289,6 +290,17 @@ def test_duplicate_queue_request_returns_same_record(api_context):
     assert listing.status_code == 200
     assert len(listing.json()) == 1
 
+    with session_factory() as db:
+        queue_audits = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.action == "execution.queued",
+                AuditLog.target_id == first.json()["id"],
+            )
+            .all()
+        )
+
+        assert len(queue_audits) == 1
 
 def test_non_admin_cannot_queue_action(api_context):
     client = api_context["client"]
