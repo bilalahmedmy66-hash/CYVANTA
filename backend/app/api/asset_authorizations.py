@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -27,6 +27,48 @@ router = APIRouter(
     prefix="/assets",
     tags=["Asset Authorization"],
 )
+
+@router.get("/authorizations")
+def list_authorizations(
+    user: User = Depends(get_current_user),
+    membership: Membership = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    """List authorization records belonging to the active organization."""
+    records = (
+        db.query(AssetAuthorization, Asset.name)
+        .join(Asset, Asset.id == AssetAuthorization.asset_id)
+        .filter(
+            AssetAuthorization.organization_id == membership.organization_id,
+            Asset.organization_id == membership.organization_id,
+        )
+        .order_by(AssetAuthorization.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": authorization.id,
+            "asset_id": authorization.asset_id,
+            "asset_name": asset_name,
+            "status": authorization.status,
+            "submitted_by": authorization.submitted_by,
+            "reviewed_by": authorization.reviewed_by,
+            "evidence_type": authorization.evidence_type,
+            "evidence_reference": authorization.evidence_reference,
+            "scope": authorization.scope,
+            "valid_from": authorization.valid_from,
+            "expires_at": authorization.expires_at,
+            "decision_reason": authorization.decision_reason,
+            "reviewed_at": authorization.reviewed_at,
+            "suspension_reason": authorization.suspension_reason,
+            "revoked_at": authorization.revoked_at,
+            "created_at": authorization.created_at,
+            "updated_at": authorization.updated_at,
+        }
+        for authorization, asset_name in records
+    ]
+
 
 
 @router.post(
@@ -145,10 +187,10 @@ def decide_authorization_request(
     membership: Membership = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ):
-    if membership.role not in ("owner", "admin"):
+    if membership.role not in ("owner", "admin", "reviewer"):
         raise HTTPException(
             status_code=403,
-            detail="Organization owner or admin permission required.",
+            detail="Organization owner, admin, or reviewer permission required.",
         )
 
     authorization = (

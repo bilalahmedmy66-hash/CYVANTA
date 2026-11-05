@@ -11,3 +11,17 @@ __pycache__/
 *.sqlite3
 logs/
 *.log
+# CYVANTA recovery backups
+**/backups/
+
+# Temporary API inspection output
+cyvanta-openapi-inspection.json
+
+# Generated frontend output
+frontend/dist/
+frontend/node_modules/
+
+# Local environment files
+.env
+# Local documentation backups
+README.md.backup_*

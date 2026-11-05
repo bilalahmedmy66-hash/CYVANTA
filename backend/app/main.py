@@ -6,7 +6,7 @@ from app.core.config import settings
 from app.database.base import Base
 from app.database.session import engine
 from app import models
-from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations
+from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations, organizations
 
 
 @asynccontextmanager
@@ -25,6 +25,7 @@ app = FastAPI(
 )
 
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(organizations.router, prefix="/api/v1")
 app.include_router(assets.router, prefix="/api/v1")
 app.include_router(asset_authorizations.router, prefix="/api/v1")
 app.include_router(missions.router)

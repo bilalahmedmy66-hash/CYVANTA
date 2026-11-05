@@ -40,6 +40,31 @@ class RegistrationResponse(BaseModel):
     organization_name: str
 
 
+class OrganizationInvitationCreateRequest(BaseModel):
+    email: EmailStr
+    role: Literal["reviewer"] = "reviewer"
+
+
+class OrganizationInvitationAcceptRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+
+
+class OrganizationInvitationResponse(BaseModel):
+    id: str
+    organization_id: str
+    email: EmailStr
+    role: str
+    expires_at: datetime
+    accepted_at: datetime | None
+    revoked_at: datetime | None
+    created_at: datetime
+
+
+class OrganizationMemberResponse(BaseModel):
+    user_id: str
+    email: EmailStr
+    role: str
+
 class AssetCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=150)
     asset_type: Literal["computer", "server", "website", "network", "cloud"]

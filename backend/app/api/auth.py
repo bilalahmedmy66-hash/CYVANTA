@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -147,3 +147,26 @@ def get_profile(
     user: User = Depends(get_current_user),
 ):
     return user
+
+@router.get("/organizations")
+def list_my_organizations(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return only organizations the authenticated user belongs to."""
+    memberships = (
+        db.query(Membership, Organization)
+        .join(Organization, Organization.id == Membership.organization_id)
+        .filter(Membership.user_id == user.id)
+        .order_by(Organization.name.asc())
+        .all()
+    )
+
+    return [
+        {
+            "organization_id": membership.organization_id,
+            "organization_name": organization.name,
+            "role": membership.role,
+        }
+        for membership, organization in memberships
+    ]

@@ -936,3 +936,265 @@ def test_other_organization_cannot_change_asset_authorization_lifecycle(client):
         assert forbidden_audits == 0
     finally:
         db_generator.close()
+
+def _register_and_login_reviewer_invitee(client, email, organization_name):
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": email,
+            "password": "StrongPassphrase123!",
+            "organization_name": organization_name,
+        },
+    )
+    assert registration.status_code == 201, registration.text
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": email,
+            "password": "StrongPassphrase123!",
+        },
+    )
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+
+def test_invited_reviewer_can_accept_and_review_authorization(client, monkeypatch):
+    from app.api.organizations import settings
+    from app.models import OrganizationInvitation
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    owner_headers = setup_account(client)
+    asset_id = setup_asset(client, owner_headers)
+    submitted = submit_authorization(client, owner_headers, asset_id)
+    assert submitted.status_code == 201, submitted.text
+
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={"email": "reviewer@example.com", "role": "reviewer"},
+    )
+    assert invite_response.status_code == 201, invite_response.text
+    invite = invite_response.json()
+    raw_token = invite["invitation_token"]
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+    try:
+        stored = db.query(OrganizationInvitation).filter(
+            OrganizationInvitation.id == invite["id"]
+        ).one()
+        assert stored.token_hash != raw_token
+        assert len(stored.token_hash) == 64
+    finally:
+        db_generator.close()
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client, "reviewer@example.com", "Reviewer Personal Organization"
+    )
+    accepted = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={"token": raw_token},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["role"] == "reviewer"
+    reviewer_headers["X-Organization-ID"] = accepted.json()["organization_id"]
+
+    decision = decide_authorization(
+        client, reviewer_headers, submitted.json()["id"], "approve"
+    )
+    assert decision.status_code == 200, decision.text
+    assert decision.json()["status"] == "verified"
+
+
+def test_invitation_rejects_wrong_email_and_prevents_token_reuse(client, monkeypatch):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    owner_headers = setup_account(client)
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={"email": "reviewer@example.com", "role": "reviewer"},
+    )
+    assert invite_response.status_code == 201, invite_response.text
+    raw_token = invite_response.json()["invitation_token"]
+
+    wrong_headers = _register_and_login_reviewer_invitee(
+        client, "wrong@example.com", "Wrong User Organization"
+    )
+    wrong = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=wrong_headers,
+        json={"token": raw_token},
+    )
+    assert wrong.status_code == 403
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client, "reviewer@example.com", "Reviewer Personal Organization"
+    )
+    accepted = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={"token": raw_token},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    repeated = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={"token": raw_token},
+    )
+    assert repeated.status_code == 409
+
+
+def test_reviewer_cannot_suspend_authorization(client, monkeypatch):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    owner_headers = setup_account(client)
+    asset_id = setup_asset(client, owner_headers)
+    submitted = submit_authorization(client, owner_headers, asset_id)
+    assert submitted.status_code == 201, submitted.text
+
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={"email": "reviewer@example.com", "role": "reviewer"},
+    )
+    assert invite_response.status_code == 201, invite_response.text
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client, "reviewer@example.com", "Reviewer Personal Organization"
+    )
+    accepted = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={"token": invite_response.json()["invitation_token"]},
+    )
+    assert accepted.status_code == 200, accepted.text
+    reviewer_headers["X-Organization-ID"] = accepted.json()["organization_id"]
+
+    suspended = client.post(
+        f"/api/v1/assets/authorizations/{submitted.json()['id']}/suspend",
+        headers=reviewer_headers,
+        json={"reason": "Reviewer role must not manage authorization lifecycle."},
+    )
+    assert suspended.status_code == 403
+
+
+
+# CYVANTA_ORGANIZATION_PERMISSION_TESTS_V1
+
+def test_reviewer_cannot_manage_organization_members_or_invitations(client, monkeypatch):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    owner_headers = setup_account(client)
+    reviewer_headers = setup_reviewer(client, role="reviewer")
+
+    invite_payload = {"email": "new-invitee@example.com", "role": "reviewer"}
+
+    create_invitation = client.post(
+        "/api/v1/organizations/invitations",
+        headers=reviewer_headers,
+        json=invite_payload,
+    )
+    list_invitations = client.get(
+        "/api/v1/organizations/invitations",
+        headers=reviewer_headers,
+    )
+    list_members = client.get(
+        "/api/v1/organizations/members",
+        headers=reviewer_headers,
+    )
+    remove_member = client.delete(
+        "/api/v1/organizations/members/nonexistent-user-id",
+        headers=reviewer_headers,
+    )
+
+    assert create_invitation.status_code == 403
+    assert list_invitations.status_code == 403
+    assert list_members.status_code == 403
+    assert remove_member.status_code == 403
+
+    # The owner remains able to inspect the organization after denied attempts.
+    owner_members = client.get("/api/v1/organizations/members", headers=owner_headers)
+    assert owner_members.status_code == 200
+
+
+def test_admin_cannot_manage_owner_only_organization_membership(client, monkeypatch):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    setup_account(client)
+    admin_headers = setup_reviewer(client, role="admin")
+
+    create_invitation = client.post(
+        "/api/v1/organizations/invitations",
+        headers=admin_headers,
+        json={"email": "admin-invitee@example.com", "role": "reviewer"},
+    )
+    list_invitations = client.get(
+        "/api/v1/organizations/invitations",
+        headers=admin_headers,
+    )
+    list_members = client.get(
+        "/api/v1/organizations/members",
+        headers=admin_headers,
+    )
+    remove_member = client.delete(
+        "/api/v1/organizations/members/nonexistent-user-id",
+        headers=admin_headers,
+    )
+
+    assert create_invitation.status_code == 403
+    assert list_invitations.status_code == 403
+    assert list_members.status_code == 403
+    assert remove_member.status_code == 403
+
+
+def test_owner_can_list_members_and_create_reviewer_invitation(client, monkeypatch):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+    owner_headers = setup_account(client)
+
+    members = client.get("/api/v1/organizations/members", headers=owner_headers)
+    assert members.status_code == 200
+    assert any(item["role"] == "owner" for item in members.json())
+
+    invitations = client.get("/api/v1/organizations/invitations", headers=owner_headers)
+    assert invitations.status_code == 200
+
+    created = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={"email": "owner-invited-reviewer@example.com", "role": "reviewer"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["role"] == "reviewer"
+    assert created.json()["delivery_mode"] == "development_handoff"
+
+
+def test_owner_cannot_remove_self_or_another_owner(client):
+    owner_headers = setup_account(client)
+    second_owner_headers = setup_reviewer(client, role="owner")
+
+    self_profile = client.get("/api/v1/auth/me", headers=owner_headers)
+    second_owner_profile = client.get("/api/v1/auth/me", headers=second_owner_headers)
+    assert self_profile.status_code == 200, self_profile.text
+    assert second_owner_profile.status_code == 200, second_owner_profile.text
+
+    remove_self = client.delete(
+        f"/api/v1/organizations/members/{self_profile.json()['id']}",
+        headers=owner_headers,
+    )
+    remove_second_owner = client.delete(
+        f"/api/v1/organizations/members/{second_owner_profile.json()['id']}",
+        headers=owner_headers,
+    )
+
+    assert remove_self.status_code == 400
+    assert remove_second_owner.status_code == 409
