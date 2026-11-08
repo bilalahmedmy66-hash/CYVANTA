@@ -4,6 +4,7 @@ import {
   RefreshCw, ShieldCheck, Target
 } from "lucide-react";
 import { apiRequest, getSession } from "./api";
+import IntelligenceGraph from "./IntelligenceGraph";
 
 function asList(value) {
   if (Array.isArray(value)) return value;
@@ -56,7 +57,7 @@ function ErrorNotice({ message }) {
 }
 
 function StatusLine({ loading, error, count, noun }) {
-  if (loading) return <p className="workspace-data-status">Loading {noun}â€¦</p>;
+  if (loading) return <p className="workspace-data-status">Loading {noun}…</p>;
   if (error) return <p className="workspace-data-status">This section could not be loaded. Other sections remain available.</p>;
   return <p className="workspace-data-status"><CheckCircle2 size={13}/> {count} {noun} returned by the backend</p>;
 }
@@ -278,9 +279,9 @@ export default function WorkspacePage({ active }) {
     </>;
 
     if (activeKey === "intelligence graph") return <>
-      <div className="workspace-intro"><Network/><div><b>Relationship intelligence</b><p>Graph visualization is intentionally unavailable until a verified graph-data endpoint is provided by the backend.</p></div></div>
+      <div className="workspace-intro"><Network/><div><b>Relationship intelligence</b><p>Explore organization-scoped relationships returned by the CYVANTA intelligence graph API. This view is read-only and does not initiate security operations.</p></div></div>
       <Panel eyebrow="01 / RELATIONSHIPS" title="Intelligence graph">
-        <div className="workspace-empty"><Network size={24}/><b>No graph data endpoint available</b><p>The current API contract does not expose a graph endpoint. CYVANTA will not fabricate entities, edges, or relationships.</p></div>
+        <IntelligenceGraph />
       </Panel>
     </>;
     return null;

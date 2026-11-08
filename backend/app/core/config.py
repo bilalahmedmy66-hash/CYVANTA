@@ -1,4 +1,4 @@
-﻿from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
 
     database_url: str = "sqlite:///./cyvanta.db"
+
+    google_api_key: str | None = None
+    gemini_model: str = "gemini-3.8-flash"
 
     model_config = SettingsConfigDict(
         env_file=".env",

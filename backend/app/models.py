@@ -644,3 +644,27 @@ class ExecutionLifecycleEvent(Base):
         nullable=False,
         index=True,
     )
+
+# CYVANTA_AI_JOB_STAGE1
+from sqlalchemy import Text
+
+
+class AIAnalysisJob(Base):
+    """Organization-scoped, advisory-only AI analysis work item."""
+
+    __tablename__ = "ai_analysis_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_id)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    submitted_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    analysis_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False, index=True)
+    evidence_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
