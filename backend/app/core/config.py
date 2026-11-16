@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
 
     secret_key: str
+    security_event_hmac_key: str | None = None
     access_token_expire_minutes: int = 30
 
     database_url: str = "sqlite:///./cyvanta.db"

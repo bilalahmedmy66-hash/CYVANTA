@@ -11,13 +11,15 @@ import {
 } from "lucide-react";
 import "./App.css";
 import AuthGate from "./AuthGate";
-import { getSession } from "./api";
+import { apiRequest, getSession } from "./api";
 import WorkspacePage from "./WorkspacePage";
 import OrganizationPage from "./OrganizationPage";
+import DetectionDashboard from "./DetectionDashboard";
 
 const navigation = [
   ["Command centre", Gauge, "OPERATIONS"],
   ["Attack surface", Crosshair, "OPERATIONS"],
+  ["Detection & Alerts", Bell, "OPERATIONS"],
   ["Authorizations", LockKeyhole, "GOVERNANCE"],
   ["Execution queue", Activity, "GOVERNANCE"],
   ["Intelligence graph", Network, "INTELLIGENCE"],
@@ -108,7 +110,7 @@ function SparklinePlaceholder() {
   );
 }
 
-function Metric({ icon: Icon, label, note, index }) {
+function Metric({ icon: Icon, label, note, index, value = "—", available = true }) {
   return (
     <motion.article className="metric" custom={index} variants={pageMotion} initial="hidden" animate="visible">
       <div className="metric-top">
@@ -117,12 +119,36 @@ function Metric({ icon: Icon, label, note, index }) {
         <ArrowUpRight size={14} className="metric-arrow" />
       </div>
       <div className="metric-bottom">
-        <strong>—</strong>
-        <SparklinePlaceholder />
+        <strong>{value}</strong>
+        {available ? <SparklinePlaceholder /> : <span className="kpi-unavailable">NOT AVAILABLE</span>}
       </div>
       <small>{note}</small>
     </motion.article>
   );
+}
+
+function isCurrentAuthorization(record, now = Date.now()) {
+  if (record?.status !== "verified") return false;
+  const starts = record.valid_from ? new Date(record.valid_from).getTime() : NaN;
+  const expires = record.expires_at ? new Date(record.expires_at).getTime() : NaN;
+  return Number.isFinite(starts) && Number.isFinite(expires) && starts <= now && now < expires;
+}
+
+function activityLabel(item) {
+  if (item.kind === "execution") {
+    return `Execution ${item.status || "updated"}`;
+  }
+  return item.action_type
+    ? `${String(item.action_type).replaceAll("_", " ")} · ${item.status || "requested"}`
+    : `Action ${item.status || "updated"}`;
+}
+
+function formatActivityTime(value) {
+  if (!value) return "Time unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Time unavailable"
+    : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 function Dashboard({ onSignOut }) {
@@ -137,11 +163,130 @@ function Dashboard({ onSignOut }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [now, setNow] = useState(new Date());
+  const [apiStatus, setApiStatus] = useState("checking");
+  const [commandData, setCommandData] = useState({
+    loading: true,
+    error: "",
+    assets: [],
+    authorizations: [],
+    executions: [],
+    actions: []
+  });
+
+  useEffect(() => {
+    let active = true;
+
+    const checkApi = async () => {
+      try {
+        const result = await apiRequest("/health");
+        if (active && result?.status === "ok") {
+          setApiStatus("online");
+        } else if (active) {
+          setApiStatus("offline");
+        }
+      } catch {
+        if (active) setApiStatus("offline");
+      }
+    };
+
+    checkApi();
+    const healthTimer = window.setInterval(checkApi, 30000);
+
+    return () => {
+      active = false;
+      window.clearInterval(healthTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadCommandData = async () => {
+      try {
+        const [assetsResult, authorizationsResult, executionsResult, missionsResult] =
+          await Promise.allSettled([
+            apiRequest("/assets"),
+            apiRequest("/assets/authorizations"),
+            apiRequest("/executions"),
+            apiRequest("/missions")
+          ]);
+
+        const assets = assetsResult.status === "fulfilled" && Array.isArray(assetsResult.value)
+          ? assetsResult.value : [];
+        const authorizations = authorizationsResult.status === "fulfilled" && Array.isArray(authorizationsResult.value)
+          ? authorizationsResult.value : [];
+        const executions = executionsResult.status === "fulfilled" && Array.isArray(executionsResult.value)
+          ? executionsResult.value : [];
+        const missions = missionsResult.status === "fulfilled" && Array.isArray(missionsResult.value)
+          ? missionsResult.value : [];
+
+        const actionResults = await Promise.allSettled(
+          missions.map((mission) => apiRequest(`/missions/${encodeURIComponent(mission.id)}/actions`))
+        );
+        const actions = actionResults
+          .filter((result) => result.status === "fulfilled" && Array.isArray(result.value))
+          .flatMap((result) => result.value);
+
+        const failedSources = [
+          assetsResult, authorizationsResult, executionsResult, missionsResult
+        ].filter((result) => result.status === "rejected").length;
+
+        if (active) {
+          setCommandData({
+            loading: false,
+            error: failedSources ? `${failedSources} dashboard data source(s) could not be loaded.` : "",
+            assets,
+            authorizations,
+            executions,
+            actions
+          });
+        }
+      } catch (error) {
+        if (active) {
+          setCommandData((current) => ({
+            ...current,
+            loading: false,
+            error: error.message || "Dashboard data could not be loaded."
+          }));
+        }
+      }
+    };
+
+    loadCommandData();
+    const refreshTimer = window.setInterval(loadCommandData, 30000);
+
+    return () => {
+      active = false;
+      window.clearInterval(refreshTimer);
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const currentTimestamp = now.getTime();
+  const authorizedAssetIds = new Set(
+    commandData.authorizations
+      .filter((record) => isCurrentAuthorization(record, currentTimestamp))
+      .map((record) => record.asset_id)
+  );
+  const authorizedAssetCount = new Set(
+    commandData.assets
+      .filter((asset) => authorizedAssetIds.has(asset.id))
+      .map((asset) => asset.id)
+  ).size;
+  const activeExecutionCount = commandData.executions.filter(
+    (execution) => execution.status === "running"
+  ).length;
+  const pendingApprovalCount = commandData.actions.filter(
+    (action) => action.status === "pending_approval"
+  ).length;
+  const recentActivity = [
+    ...commandData.executions.map((item) => ({ ...item, kind: "execution" })),
+    ...commandData.actions.map((item) => ({ ...item, kind: "action" }))
+  ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 5);
 
   const time = now.toLocaleTimeString("en-GB", { hour12: false });
   const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -173,9 +318,9 @@ function Dashboard({ onSignOut }) {
         <div className="sidebar-end">
           <div className="environment">
             <label><i /> ENVIRONMENT STATUS</label>
-            <b>Awaiting connection</b>
+            <b>{apiStatus === "online" ? "Backend connected" : apiStatus === "offline" ? "Backend unavailable" : "Checking backend..."}</b>
             <p>Connect an authorized environment to receive verified telemetry.</p>
-            <div><span>API CONNECTION</span><em>NOT CONNECTED</em></div>
+            <div><span>API CONNECTION</span><em>{apiStatus === "online" ? "CONNECTED" : apiStatus === "offline" ? "OFFLINE" : "CHECKING"}</em></div>
           </div>
           <button className="nav-item settings-item"><Settings2 size={17} /><span>Settings</span></button>
           <div className="profile"><span>{operatorInitials}</span><div><b title={operatorEmail}>{operatorName}</b><small title={operatorSession?.organizationName || "No organization context"}>{operatorSession?.organizationName || operatorEmail}</small><small title={operatorEmail} style={{ overflowWrap: "anywhere" }}>{operatorEmail}</small></div><SlidersHorizontal size={16} /></div>
@@ -197,22 +342,55 @@ function Dashboard({ onSignOut }) {
           </div>
         </header>
 
-        {active === "Organization" ? <OrganizationPage /> : active === "Command centre" ? <div className="content">
+        {active === "Detection & Alerts" ? <DetectionDashboard /> : active === "Organization" ? <OrganizationPage /> : active === "Command centre" ? <div className="content">
           <section className="welcome">
             <div>
               <label><i /> AUTONOMOUS SECURITY OPERATIONS</label>
               <h1>{active === "Command centre" ? <>See the whole <em>security picture.</em></> : active}</h1>
               <p>One spatial environment for authorized security intelligence, controlled action and verifiable outcomes.</p>
             </div>
-            <div className="standby"><i /> SYSTEM STANDBY <span /> LIVE DATA UNAVAILABLE</div>
+            <div className="standby"><i /> {apiStatus === "online" ? "API ONLINE" : apiStatus === "offline" ? "API OFFLINE" : "CHECKING API"} <span /> TELEMETRY NOT CONNECTED</div>
           </section>
 
           <section className="metrics">
-            <Metric icon={ShieldCheck} label="AUTHORIZED ASSETS" note="No environment connected" index={0} />
-            <Metric icon={Activity} label="ACTIVE EXECUTIONS" note="Awaiting verified telemetry" index={1} />
-            <Metric icon={AlertOctagon} label="OPEN FINDINGS" note="No finding data received" index={2} />
-            <Metric icon={Fingerprint} label="PENDING APPROVALS" note="No approval data received" index={3} />
+            <Metric
+              icon={ShieldCheck}
+              label="AUTHORIZED ASSETS"
+              value={commandData.loading ? "…" : authorizedAssetCount}
+              note="Verified and within authorization dates"
+              index={0}
+              available={!commandData.loading}
+            />
+            <Metric
+              icon={Activity}
+              label="ACTIVE EXECUTIONS"
+              value={commandData.loading ? "…" : activeExecutionCount}
+              note="Executions currently running"
+              index={1}
+              available={!commandData.loading}
+            />
+            <Metric
+              icon={AlertOctagon}
+              label="OPEN FINDINGS"
+              value="—"
+              note="Organization-scoped findings source not available"
+              index={2}
+              available={false}
+            />
+            <Metric
+              icon={Fingerprint}
+              label="PENDING APPROVALS"
+              value={commandData.loading ? "…" : pendingApprovalCount}
+              note="Action requests awaiting a decision"
+              index={3}
+              available={!commandData.loading}
+            />
           </section>
+          {commandData.error && (
+            <div className="workspace-error" role="status">
+              Some Command Centre data could not be loaded. {commandData.error}
+            </div>
+          )}
 
           <section className="spatial">
             <motion.article className="panel spatial-panel" variants={pageMotion} initial="hidden" animate="visible" custom={4}>
@@ -242,8 +420,22 @@ function Dashboard({ onSignOut }) {
               </motion.article>
 
               <motion.article className="panel activity" variants={pageMotion} initial="hidden" animate="visible" custom={6}>
-                <div className="panel-head"><div><label>03 / EVENT STREAM</label><h2>Recent activity</h2></div><span className="stream"><i /> NO STREAM</span></div>
-                <div className="empty"><Radio size={20} /><b>Waiting for verified events</b><p>System activity appears here after backend connection is configured.</p></div>
+                <div className="panel-head"><div><label>03 / EVENT STREAM</label><h2>Recent activity</h2></div><span className="stream"><i /> {commandData.loading ? "SYNCING" : recentActivity.length ? "LIVE DATA" : "NO EVENTS"}</span></div>
+                {commandData.loading ? (
+                  <div className="empty"><Radio size={20} /><b>Loading organization activity</b><p>Retrieving scoped action and execution records.</p></div>
+                ) : recentActivity.length ? (
+                  <div className="cc-activity-list">
+                    {recentActivity.map((item) => (
+                      <div className="cc-activity-row" key={`${item.kind}-${item.id}`}>
+                        <span className="cc-activity-dot" />
+                        <div><b>{activityLabel(item)}</b><small>{item.description || item.id}</small></div>
+                        <time>{formatActivityTime(item.created_at)}</time>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty"><Radio size={20} /><b>No recent action or execution records</b><p>New organization activity will appear here when recorded.</p></div>
+                )}
               </motion.article>
             </div>
           </section>
@@ -251,7 +443,13 @@ function Dashboard({ onSignOut }) {
           <section className="bottom">
             <motion.article className="panel" variants={pageMotion} initial="hidden" animate="visible" custom={7}>
               <div className="panel-head"><div><label>04 / ENVIRONMENT</label><h2>Connected surface</h2></div><Globe2 size={17} /></div>
-              <div className="empty-inline"><Boxes size={18} /><b>No authorized assets loaded</b><small>Register and authorize assets before discovery.</small></div>
+              <div className="empty-inline">
+                <Boxes size={18} />
+                <b>{commandData.loading ? "Loading registered assets" : `${commandData.assets.length} registered assets`}</b>
+                <small>{commandData.loading
+                  ? "Retrieving assets for the selected organization."
+                  : `${authorizedAssetCount} currently authorized · ${Math.max(0, commandData.assets.length - authorizedAssetCount)} not currently authorized`}</small>
+              </div>
             </motion.article>
             <motion.article className="panel" variants={pageMotion} initial="hidden" animate="visible" custom={8}>
               <div className="panel-head"><div><label>05 / INTELLIGENCE</label><h2>Relationship graph</h2></div><Network size={17} /></div>
@@ -287,3 +485,4 @@ function App() {
 }
 
 export default App;
+

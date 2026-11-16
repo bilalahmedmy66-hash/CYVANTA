@@ -182,3 +182,51 @@ def test_pending_action_is_blocked():
     action, asset, approval, authorization = make_objects()
     action.status = "pending_approval"
     assert not evaluate(action, asset, approval, authorization).allowed
+
+def test_domain_normalization_accepts_valid_domain():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("execution-server.local") == "execution-server.local"
+
+
+def test_domain_normalization_accepts_standard_domain():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("example.com") == "example.com"
+
+
+def test_domain_normalization_lowercases_and_removes_trailing_dot():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("API.EXAMPLE.COM.") == "api.example.com"
+
+
+def test_domain_normalization_accepts_ipv4():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("192.168.1.10") == "192.168.1.10"
+
+
+def test_domain_normalization_rejects_url():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("https://example.com") is None
+
+
+def test_domain_normalization_rejects_path():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("example.com/path") is None
+
+
+def test_domain_normalization_rejects_leading_hyphen():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("-invalid.com") is None
+
+
+def test_domain_normalization_rejects_underscore():
+    from app.action_engine.policy import _normalize_target
+
+    assert _normalize_target("invalid_domain.com") is None
+

@@ -1,0 +1,421 @@
+﻿from datetime import datetime, timedelta, timezone
+import threading
+
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.database.base import Base
+from app.models import (
+    ActionApproval,
+    ActionRequest,
+    Asset,
+    AssetAuthorization,
+    EmergencyStopState,
+    ExecutionRecord,
+    Mission,
+    Organization,
+    PlatformEmergencyStopState,
+    SimulationDispatch,
+    SimulationDispatchEvent,
+    User,
+)
+from app.action_engine.simulation_dispatcher import (
+    SimulationDispatchValidationError,
+    claim_simulation_dispatch,
+)
+from app.action_engine.worker_capabilities import (
+    CAPABILITY_SIMULATION,
+    WORKER_TYPE_SIMULATION,
+)
+from app.action_engine.worker_registry import WorkerRegistry
+
+
+def make_test_database(tmp_path):
+    database_path = tmp_path / "simulation_dispatch_test.sqlite3"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, record):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+
+    factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+    )
+    return engine, factory
+
+
+def make_registry():
+    registry = WorkerRegistry(max_workers=1)
+    registry.register(
+        worker_id="integration-simulation-worker",
+        name="Integration Simulation Worker",
+        worker_type=WORKER_TYPE_SIMULATION,
+        capabilities={CAPABILITY_SIMULATION},
+    )
+    registry.activate("integration-simulation-worker")
+    return registry
+
+
+def seed_valid_records(db, scenario=None):
+    now = datetime.now(timezone.utc)
+
+    user = User(
+        email="simulation-test@example.invalid",
+        password_hash="not-a-real-password-hash",
+    )
+    organization = Organization(name="Synthetic Test Organization")
+    db.add_all([user, organization])
+    db.flush()
+
+    asset = Asset(
+        organization_id=organization.id,
+        name="Synthetic Test Asset",
+        asset_type="domain",
+        identifier="example.test",
+        authorization_reference="SYNTHETIC-TEST-REFERENCE",
+        authorization_status="verified",
+        assessment_enabled=True,
+        created_by=user.id,
+    )
+    db.add(asset)
+    db.flush()
+
+    mission = Mission(
+        organization_id=organization.id,
+        created_by=user.id,
+        asset_id=asset.id,
+        title="Synthetic Inventory Mission",
+        objective="Simulation-only integration test",
+        priority="normal",
+        status="planned",
+    )
+    db.add(mission)
+    db.flush()
+
+    action = ActionRequest(
+        mission_id=mission.id,
+        organization_id=organization.id,
+        requested_by=user.id,
+        action_type="collect_inventory",
+        target_type="asset",
+        target_id=asset.id,
+        description="Synthetic inventory collection test",
+        risk_level="low",
+        status="approved",
+    )
+    db.add(action)
+    db.flush()
+
+    approval = ActionApproval(
+        action_request_id=action.id,
+        organization_id=organization.id,
+        decided_by=user.id,
+        decision="approve",
+        reason="Approved for synthetic integration testing",
+    )
+    db.add(approval)
+
+    execution = ExecutionRecord(
+        action_request_id=action.id,
+        organization_id=organization.id,
+        status="queued",
+        result={},
+        verified=False,
+    )
+    db.add(execution)
+
+    if scenario != "missing_org_stop":
+        db.add(
+            EmergencyStopState(
+                organization_id=organization.id,
+                is_active=(scenario == "active_org_stop"),
+                reason="Synthetic integration test state",
+                changed_by=user.id,
+            )
+        )
+
+    if scenario != "missing_platform_stop":
+        db.add(
+            PlatformEmergencyStopState(
+                id="platform-master",
+                is_active=(scenario == "active_platform_stop"),
+                reason="Synthetic integration test state",
+            )
+        )
+
+    auth_status = (
+        "revoked" if scenario == "revoked_authorization" else "verified"
+    )
+    valid_from = now - timedelta(hours=1)
+    expires_at = now + timedelta(days=1)
+
+    if scenario == "expired_authorization":
+        expires_at = now - timedelta(hours=1)
+    elif scenario == "future_authorization":
+        valid_from = now + timedelta(days=1)
+
+    scope = {
+        "domains": ["example.test"],
+        "ip_addresses": [],
+        "excluded_targets": [],
+        "allowed_assessment_types": ["collect_inventory"],
+    }
+
+    if scenario == "malformed_scope":
+        scope = {"domains": "example.test"}
+
+    authorization = AssetAuthorization(
+        organization_id=organization.id,
+        asset_id=asset.id,
+        status=auth_status,
+        submitted_by=user.id,
+        reviewed_by=user.id,
+        evidence_type="synthetic_test",
+        evidence_reference="SYNTHETIC-AUTHORIZATION-EVIDENCE",
+        scope=scope,
+        valid_from=valid_from,
+        expires_at=expires_at,
+        reviewed_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(authorization)
+
+    if scenario == "rejected_approval":
+        approval.decision = "reject"
+
+    db.commit()
+
+    return {
+        "execution_id": execution.id,
+        "execution_status": execution.status,
+    }
+
+
+def assert_rejected_without_side_effects(factory, execution_id, registry):
+    claim_db = factory()
+    try:
+        with pytest.raises(SimulationDispatchValidationError):
+            claim_simulation_dispatch(
+                db=claim_db,
+                execution_record_id=execution_id,
+                worker_registry=registry,
+                worker_id="integration-simulation-worker",
+            )
+    finally:
+        claim_db.close()
+
+    verify_db = factory()
+    try:
+        execution = verify_db.get(ExecutionRecord, execution_id)
+        assert execution is not None
+        assert execution.status == "queued"
+
+        assert (
+            verify_db.query(SimulationDispatch)
+            .filter(
+                SimulationDispatch.execution_record_id == execution_id
+            )
+            .count()
+            == 0
+        )
+
+        assert verify_db.query(SimulationDispatchEvent).count() == 0
+    finally:
+        verify_db.close()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "missing_platform_stop",
+        "active_platform_stop",
+        "missing_org_stop",
+        "active_org_stop",
+        "revoked_authorization",
+        "expired_authorization",
+        "future_authorization",
+        "malformed_scope",
+        "rejected_approval",
+    ],
+)
+def test_unsafe_dispatch_claim_fails_closed(tmp_path, scenario):
+    engine, factory = make_test_database(tmp_path)
+    seed_db = factory()
+
+    try:
+        records = seed_valid_records(seed_db, scenario)
+        execution_id = records["execution_id"]
+    finally:
+        seed_db.close()
+
+    try:
+        assert_rejected_without_side_effects(
+            factory,
+            execution_id,
+            make_registry(),
+        )
+    finally:
+        engine.dispose()
+
+
+def test_policy_exception_fails_closed_without_records(
+    tmp_path,
+    monkeypatch,
+):
+    import app.action_engine.simulation_dispatcher as dispatcher
+
+    engine, factory = make_test_database(tmp_path)
+    seed_db = factory()
+
+    try:
+        records = seed_valid_records(seed_db)
+        execution_id = records["execution_id"]
+    finally:
+        seed_db.close()
+
+    def raise_policy_error(**kwargs):
+        raise RuntimeError("Synthetic policy failure")
+
+    monkeypatch.setattr(
+        dispatcher,
+        "evaluate_action_policy",
+        raise_policy_error,
+    )
+
+    try:
+        assert_rejected_without_side_effects(
+            factory,
+            execution_id,
+            make_registry(),
+        )
+    finally:
+        engine.dispose()
+
+
+def test_dispatch_claim_holds_worker_lease_until_commit(
+    tmp_path,
+    monkeypatch,
+):
+    engine, factory = make_test_database(tmp_path)
+    seed_db = factory()
+
+    try:
+        records = seed_valid_records(seed_db)
+        execution_id = records["execution_id"]
+    finally:
+        seed_db.close()
+
+    registry = make_registry()
+
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    revoke_started = threading.Event()
+    revoke_finished = threading.Event()
+
+    claim_results = []
+    thread_errors = []
+
+    original_commit = Session.commit
+
+    def controlled_commit(session, *args, **kwargs):
+        if session.info.pop("pause_dispatch_commit", False):
+            commit_entered.set()
+            if not release_commit.wait(timeout=5):
+                raise RuntimeError("Timed out waiting to release test commit.")
+        return original_commit(session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "commit", controlled_commit)
+
+    def run_claim():
+        db = factory()
+        try:
+            db.info["pause_dispatch_commit"] = True
+            dispatch = claim_simulation_dispatch(
+                db=db,
+                execution_record_id=execution_id,
+                worker_registry=registry,
+                worker_id="integration-simulation-worker",
+            )
+            claim_results.append(dispatch.id)
+        except BaseException as exc:
+            thread_errors.append(exc)
+        finally:
+            db.close()
+
+    def run_revoke():
+        revoke_started.set()
+        try:
+            registry.revoke("integration-simulation-worker")
+        except BaseException as exc:
+            thread_errors.append(exc)
+        finally:
+            revoke_finished.set()
+
+    claim_thread = threading.Thread(target=run_claim)
+    revoke_thread = threading.Thread(target=run_revoke)
+
+    try:
+        claim_thread.start()
+        assert commit_entered.wait(timeout=5), (
+            "Dispatch did not reach the controlled commit."
+        )
+
+        revoke_thread.start()
+        assert revoke_started.wait(timeout=2), (
+            "Revocation thread did not start."
+        )
+
+        # Revocation must remain blocked while the claim holds its lease.
+        assert not revoke_finished.wait(timeout=0.2), (
+            "Worker was revoked before the dispatch transaction committed."
+        )
+
+        release_commit.set()
+
+        claim_thread.join(timeout=5)
+        revoke_thread.join(timeout=5)
+
+        assert not claim_thread.is_alive(), "Claim thread did not finish."
+        assert not revoke_thread.is_alive(), "Revocation thread did not finish."
+        assert not thread_errors, f"Thread errors: {thread_errors}"
+        assert len(claim_results) == 1
+        assert revoke_finished.is_set()
+
+        verify_db = factory()
+        try:
+            execution = verify_db.get(ExecutionRecord, execution_id)
+            assert execution is not None
+            assert execution.status == "queued"
+
+            dispatch = verify_db.get(SimulationDispatch, claim_results[0])
+            assert dispatch is not None
+            assert dispatch.status == "claimed"
+
+            assert (
+                verify_db.query(SimulationDispatchEvent)
+                .filter(
+                    SimulationDispatchEvent.dispatch_id == dispatch.id
+                )
+                .count()
+                == 1
+            )
+        finally:
+            verify_db.close()
+
+    finally:
+        release_commit.set()
+        claim_thread.join(timeout=5)
+        if revoke_thread.ident is not None:
+            revoke_thread.join(timeout=5)
+        engine.dispose()

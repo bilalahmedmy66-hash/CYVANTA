@@ -1,0 +1,505 @@
+
+from datetime import datetime, timezone
+
+import pytest
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database.base import Base
+from app.models import (
+    PlatformDetectionFinding,
+    PlatformDetectionFindingEvent,
+    SecuritySignal,
+)
+from app.security.detection_engine import DetectionFinding
+from app.security.security_signals import FAILED_LOGIN_EVENT
+from app.security.finding_persistence import (
+    persist_detection_findings,
+)
+
+
+@pytest.fixture
+def db():
+    """Create an isolated in-memory SQLite database."""
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    Base.metadata.create_all(bind=engine)
+
+    TestingSession = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+    session = TestingSession()
+
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def seed_signal(
+    db,
+    signal_id,
+    source_ip="192.0.2.10",
+    fingerprint="a" * 64,
+    event_type=FAILED_LOGIN_EVENT,
+):
+    """Create a genuine persisted security signal for testing."""
+
+    signal = SecuritySignal(
+        id=signal_id,
+        event_type=event_type,
+        source_ip=source_ip,
+        account_fingerprint=fingerprint,
+        details={},
+        created_at=datetime.now(timezone.utc),
+    )
+
+    db.add(signal)
+    db.commit()
+
+    return signal
+
+
+def seed_signals(db, signal_ids, source_ip="192.0.2.10"):
+    """Create persisted signals matching an IP-burst finding."""
+
+    for signal_id in signal_ids:
+        seed_signal(
+            db,
+            signal_id,
+            source_ip=source_ip,
+        )
+
+
+def make_finding(
+    signal_ids=None,
+    source_ip="192.0.2.10",
+):
+    """Build a deterministic IP-burst test finding."""
+
+    if signal_ids is None:
+        signal_ids = ["signal-001", "signal-002"]
+
+    return DetectionFinding(
+        rule_id="AUTH_IP_BURST",
+        severity="high",
+        title="Repeated failed logins from one IP",
+        description="Repeated failed login attempts detected.",
+        detected_at=datetime.now(timezone.utc),
+        evidence={
+            "source_ip": source_ip,
+            "attempt_count": len(signal_ids),
+            "window_minutes": 5,
+            "signal_ids": signal_ids,
+        },
+    )
+
+
+def test_new_finding_is_created_with_audit_event(db):
+    seed_signals(db, ["signal-001", "signal-002"])
+
+    result = persist_detection_findings(
+        db,
+        [make_finding()],
+    )
+
+    finding = db.query(PlatformDetectionFinding).one()
+
+    events = (
+        db.query(PlatformDetectionFindingEvent)
+        .filter_by(finding_id=finding.id)
+        .all()
+    )
+
+    assert result["created"] == 1
+    assert finding.status == "open"
+    assert finding.occurrence_count == 2
+    assert finding.rule_id == "AUTH_IP_BURST"
+    assert finding.evidence["signal_ids"] == [
+        "signal-001",
+        "signal-002",
+    ]
+
+    assert len(events) == 1
+    assert events[0].event_type == "detected"
+
+
+def test_repeated_scan_does_not_increase_occurrence_count(db):
+    seed_signals(db, ["signal-001", "signal-002"])
+
+    detection = make_finding()
+
+    first_result = persist_detection_findings(db, [detection])
+    second_result = persist_detection_findings(db, [detection])
+
+    finding = db.query(PlatformDetectionFinding).one()
+
+    events = (
+        db.query(PlatformDetectionFindingEvent)
+        .filter_by(finding_id=finding.id)
+        .all()
+    )
+
+    assert first_result["created"] == 1
+    assert second_result["unchanged"] == 1
+    assert finding.occurrence_count == 2
+    assert len(events) == 1
+
+
+def test_new_signal_ids_increase_occurrence_count_once(db):
+    seed_signals(
+        db,
+        ["signal-001", "signal-002", "signal-003"],
+    )
+
+    first_detection = make_finding(
+        ["signal-001", "signal-002"]
+    )
+
+    second_detection = make_finding(
+        ["signal-001", "signal-002", "signal-003"]
+    )
+
+    persist_detection_findings(db, [first_detection])
+
+    result = persist_detection_findings(
+        db,
+        [second_detection],
+    )
+
+    finding = db.query(PlatformDetectionFinding).one()
+
+    assert result["updated"] == 1
+    assert finding.occurrence_count == 3
+    assert set(finding.evidence["signal_ids"]) == {
+        "signal-001",
+        "signal-002",
+        "signal-003",
+    }
+
+    event_count = (
+        db.query(PlatformDetectionFindingEvent)
+        .filter_by(finding_id=finding.id)
+        .count()
+    )
+
+    assert event_count == 2
+
+
+def test_new_evidence_reopens_closed_finding(db):
+    seed_signals(
+        db,
+        ["signal-001", "signal-002", "signal-003"],
+    )
+
+    detection = make_finding(
+        ["signal-001", "signal-002"]
+    )
+
+    persist_detection_findings(db, [detection])
+
+    finding = db.query(PlatformDetectionFinding).one()
+    finding.status = "closed"
+    db.commit()
+
+    updated_detection = make_finding(
+        ["signal-001", "signal-002", "signal-003"]
+    )
+
+    result = persist_detection_findings(
+        db,
+        [updated_detection],
+    )
+
+    db.refresh(finding)
+
+    assert result["reopened"] == 1
+    assert finding.status == "open"
+    assert finding.occurrence_count == 3
+
+    reopened_event = (
+        db.query(PlatformDetectionFindingEvent)
+        .filter_by(
+            finding_id=finding.id,
+            event_type="reopened",
+        )
+        .one()
+    )
+
+    assert reopened_event is not None
+
+
+def test_failed_batch_rolls_back_all_changes(db):
+    seed_signals(
+        db,
+        ["signal-001", "signal-002"],
+    )
+
+    valid_detection = make_finding()
+
+    invalid_detection = DetectionFinding(
+        rule_id="UNSUPPORTED_RULE",
+        severity="high",
+        title="Invalid test finding",
+        description="This finding must be rejected.",
+        detected_at=datetime.now(timezone.utc),
+        evidence={"signal_ids": ["signal-003"]},
+    )
+
+    with pytest.raises(ValueError):
+        persist_detection_findings(
+            db,
+            [valid_detection, invalid_detection],
+        )
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+    assert db.query(PlatformDetectionFindingEvent).count() == 0
+
+
+def test_same_rule_and_target_use_same_finding(db):
+    seed_signals(
+        db,
+        ["signal-001", "signal-002", "signal-003"],
+    )
+
+    first = make_finding(
+        ["signal-001", "signal-002"],
+    )
+
+    second = make_finding(
+        ["signal-003"],
+    )
+
+    persist_detection_findings(db, [first])
+    persist_detection_findings(db, [second])
+
+    assert db.query(PlatformDetectionFinding).count() == 1
+
+    finding = db.query(PlatformDetectionFinding).one()
+    assert finding.occurrence_count == 3
+
+
+def test_different_targets_create_different_findings(db):
+    seed_signal(
+        db,
+        "signal-001",
+        source_ip="192.0.2.10",
+    )
+
+    seed_signal(
+        db,
+        "signal-002",
+        source_ip="192.0.2.20",
+    )
+
+    first = make_finding(
+        ["signal-001"],
+        source_ip="192.0.2.10",
+    )
+
+    second = make_finding(
+        ["signal-002"],
+        source_ip="192.0.2.20",
+    )
+
+    persist_detection_findings(db, [first])
+    persist_detection_findings(db, [second])
+
+    assert db.query(PlatformDetectionFinding).count() == 2
+
+
+def test_missing_signal_ids_are_rejected(db):
+    detection = make_finding(signal_ids=[])
+
+    with pytest.raises(ValueError):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_nonexistent_signal_ids_are_rejected(db):
+    detection = make_finding(["fabricated-signal"])
+
+    with pytest.raises(ValueError, match="do not exist"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_signal_with_wrong_source_ip_is_rejected(db):
+    seed_signal(
+        db,
+        "signal-001",
+        source_ip="192.0.2.20",
+    )
+
+    detection = make_finding(
+        ["signal-001"],
+        source_ip="192.0.2.10",
+    )
+
+    with pytest.raises(ValueError, match="source IP"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_non_failed_login_signal_is_rejected(db):
+    seed_signal(
+        db,
+        "signal-001",
+        event_type="authentication.login_success",
+    )
+
+    detection = make_finding(["signal-001"])
+
+    with pytest.raises(ValueError, match="unsupported signal type"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_account_fingerprint_mismatch_is_rejected(db):
+    seed_signal(
+        db,
+        "signal-001",
+        fingerprint="b" * 64,
+    )
+
+    detection = DetectionFinding(
+        rule_id="AUTH_ACCOUNT_BURST",
+        severity="high",
+        title="Repeated failed logins against one account",
+        description="Account burst detected.",
+        detected_at=datetime.now(timezone.utc),
+        evidence={
+            "account_fingerprint": "a" * 64,
+            "signal_ids": ["signal-001"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="account fingerprint"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_distributed_finding_requires_source_ip_on_each_signal(db):
+    seed_signal(
+        db,
+        "signal-001",
+        source_ip=None,
+        fingerprint="a" * 64,
+    )
+
+    detection = DetectionFinding(
+        rule_id="AUTH_DISTRIBUTED_ATTEMPT",
+        severity="high",
+        title="Distributed failed-login activity",
+        description="Distributed activity detected.",
+        detected_at=datetime.now(timezone.utc),
+        evidence={
+            "account_fingerprint": "a" * 64,
+            "signal_ids": ["signal-001"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="source IP"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+def test_persistence_requires_clean_session(db):
+    db.query(PlatformDetectionFinding).count()
+
+    with pytest.raises(RuntimeError):
+        persist_detection_findings(
+            db,
+            [make_finding()],
+        )
+
+    db.rollback()
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+
+
+# =========================================================
+# IP NORMALIZATION REGRESSION TESTS
+# =========================================================
+
+def test_equivalent_ipv6_representations_are_accepted(db):
+    stored_ip = "2001:0db8:0000:0000:0000:0000:0000:0001"
+    finding_ip = "2001:db8::1"
+
+    seed_signal(
+        db,
+        "ipv6-signal-001",
+        source_ip=stored_ip,
+    )
+
+    detection = make_finding(
+        ["ipv6-signal-001"],
+        source_ip=finding_ip,
+    )
+
+    result = persist_detection_findings(db, [detection])
+
+    finding = db.query(PlatformDetectionFinding).one()
+
+    assert result["created"] == 1
+    assert finding.evidence["source_ip"] == finding_ip
+
+
+def test_equivalent_ipv4_representations_are_accepted(db):
+    stored_ip = "192.0.2.10"
+    finding_ip = " 192.0.2.10 "
+
+    seed_signal(
+        db,
+        "ipv4-signal-001",
+        source_ip=stored_ip,
+    )
+
+    detection = make_finding(
+        ["ipv4-signal-001"],
+        source_ip=finding_ip,
+    )
+
+    result = persist_detection_findings(db, [detection])
+
+    finding = db.query(PlatformDetectionFinding).one()
+
+    assert result["created"] == 1
+    assert finding.evidence["source_ip"] == finding_ip
+
+
+def test_invalid_finding_ip_is_rejected(db):
+    seed_signal(
+        db,
+        "invalid-ip-signal-001",
+        source_ip="192.0.2.10",
+    )
+
+    detection = make_finding(
+        ["invalid-ip-signal-001"],
+        source_ip="not-a-valid-ip",
+    )
+
+    with pytest.raises(ValueError, match="valid source IP"):
+        persist_detection_findings(db, [detection])
+
+    assert db.query(PlatformDetectionFinding).count() == 0
+    assert db.query(PlatformDetectionFindingEvent).count() == 0

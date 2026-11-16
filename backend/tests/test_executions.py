@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -10,7 +10,10 @@ from app.database.base import Base
 from app.database.session import get_db
 from datetime import datetime, timedelta, timezone
 
-from app.models import Asset, AssetAuthorization, AuditLog, Membership, ExecutionRecord, ExecutionLifecycleEvent
+from app.models import (
+    Asset, AssetAuthorization, AuditLog, Membership,
+    ExecutionRecord, ExecutionLifecycleEvent, PlatformEmergencyStopState,
+)
 
 
 @pytest.fixture
@@ -28,6 +31,19 @@ def api_context():
         autoflush=False,
         autocommit=False,
     )
+
+    # Queue tests begin with an explicitly released platform-wide stop.
+    # Individual tests can activate, remove, or make this state unavailable.
+    with TestingSessionLocal() as setup_db:
+        setup_db.add(
+            PlatformEmergencyStopState(
+                id="platform-master",
+                is_active=False,
+                reason="Test fixture: platform stop explicitly released.",
+                changed_by_operator_id=None,
+            )
+        )
+        setup_db.commit()
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -218,6 +234,56 @@ def test_approved_action_is_queued_without_execution(api_context):
     assert detail.status_code == 200
     assert detail.json()["id"] == data["id"]
 
+
+def test_newer_revoked_authorization_blocks_queue(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    with session_factory() as db:
+        original = (
+            db.query(AssetAuthorization)
+            .filter(AssetAuthorization.status == "verified")
+            .one()
+        )
+
+        now = datetime.now(timezone.utc)
+
+        revoked = AssetAuthorization(
+            organization_id=original.organization_id,
+            asset_id=original.asset_id,
+            status="revoked",
+            submitted_by=original.submitted_by,
+            reviewed_by=original.reviewed_by,
+            evidence_type=original.evidence_type,
+            evidence_reference="NEWER-REVOKED-TEST-RECORD",
+            scope=original.scope,
+            valid_from=original.valid_from,
+            expires_at=original.expires_at,
+            reviewed_at=original.reviewed_at,
+            revoked_by=original.reviewed_by,
+            revoked_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+
+        db.add(revoked)
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 409, response.text
+
+    listing = client.get(
+        "/api/v1/executions",
+        headers=headers,
+    )
+    assert listing.status_code == 200
+    assert listing.json() == []
 
 def test_unverified_asset_cannot_be_queued(api_context):
     client = api_context["client"]
@@ -474,6 +540,87 @@ def test_invalid_organization_header_is_rejected(api_context):
     )
 
     assert response.status_code == 403
+
+
+def test_active_platform_emergency_stop_blocks_new_queue_request(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    with session_factory() as db:
+        state = db.query(PlatformEmergencyStopState).filter(
+            PlatformEmergencyStopState.id == "platform-master"
+        ).one()
+        state.is_active = True
+        state.reason = "Test platform-wide execution gate."
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "Platform Emergency Stop is active" in response.json()["detail"]
+
+    listing = client.get("/api/v1/executions", headers=headers)
+    assert listing.status_code == 200
+    assert listing.json() == []
+
+
+def test_missing_platform_emergency_stop_state_fails_closed(api_context):
+    client = api_context["client"]
+    session_factory = api_context["session_factory"]
+
+    headers, action_id = prepare_approved_action(api_context)
+
+    with session_factory() as db:
+        db.query(PlatformEmergencyStopState).delete()
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert "Platform Emergency Stop is active" in response.json()["detail"]
+
+
+def test_unavailable_platform_emergency_stop_state_blocks_queue(
+    api_context, monkeypatch
+):
+    import app.api.executions as execution_api
+    from app.action_engine.platform_emergency_stop import (
+        PlatformEmergencyStopStateUnavailable,
+    )
+
+    client = api_context["client"]
+    headers, action_id = prepare_approved_action(api_context)
+
+    def simulate_unavailable_state(*args, **kwargs):
+        raise PlatformEmergencyStopStateUnavailable(
+            "Platform emergency-stop state could not be verified."
+        )
+
+    monkeypatch.setattr(
+        execution_api,
+        "is_platform_emergency_stop_active",
+        simulate_unavailable_state,
+    )
+
+    response = client.post(
+        f"/api/v1/actions/{action_id}/queue",
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "platform Emergency Stop state could not be verified" in response.json()["detail"]
+
+    listing = client.get("/api/v1/executions", headers=headers)
+    assert listing.status_code == 200
+    assert listing.json() == []
 
 
 def test_active_emergency_stop_blocks_new_queue_request(api_context):
@@ -1350,3 +1497,4 @@ def test_execution_history_filters_by_inclusive_date_range(api_context):
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 1
     assert filtered.json()["items"][0]["created_at"] == event_timestamp
+

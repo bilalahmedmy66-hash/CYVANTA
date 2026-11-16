@@ -884,3 +884,59 @@
 .cyvanta-network-footer span:first-child { color:#49bd91; font-family:JetBrains Mono,monospace; letter-spacing:.07em; }
 @media (max-width:1050px) { .cyvanta-network-layout { grid-template-columns:minmax(0,1fr) 245px; } .cyvanta-network-brand { min-width:155px; } .cyvanta-network-brand small { display:none; } }
 @media (max-width:760px) { .cyvanta-network-topbar { flex-wrap:wrap; gap:9px; } .cyvanta-network-brand { min-width:0; } .cyvanta-network-search { order:3; width:100%; } .cyvanta-network-layout { grid-template-columns:minmax(0,1fr); } .cyvanta-network-canvas { min-height:500px; border-right:0; } .cyvanta-network-flow { min-height:500px; } .cyvanta-network-side { max-height:none; border-top:1px solid rgba(104,143,156,.16); } .cyvanta-node-list { max-height:230px; } .cyvanta-network-legend { gap:9px; } .cyvanta-network-legend .cyvanta-network-readonly { margin-left:0; } .cyvanta-network-footer { flex-direction:column; } }
+
+
+/* Command Centre Intelligence v1 */
+.kpi-unavailable {
+  align-self: center;
+  color: #71869a;
+  font: 700 8px/1.4 "JetBrains Mono", monospace;
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+.cc-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0;
+}
+.cc-activity-row {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 2px;
+  border-bottom: 1px solid rgba(126, 157, 177, .11);
+}
+.cc-activity-row:last-child { border-bottom: 0; }
+.cc-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #39c6d8;
+  box-shadow: 0 0 12px rgba(57, 198, 216, .42);
+}
+.cc-activity-row > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.cc-activity-row b {
+  color: #dce8f2;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+.cc-activity-row small {
+  color: #71869a;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-activity-row time {
+  color: #71869a;
+  font: 9px/1.4 "JetBrains Mono", monospace;
+  text-align: right;
+  white-space: nowrap;
+}
+@media (max-width: 620px) {
+  .cc-activity-row { grid-template-columns: 8px minmax(0, 1fr); }
+  .cc-activity-row time { grid-column: 2; text-align: left; }
+}

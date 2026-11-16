@@ -5,6 +5,7 @@ from app.ai.schemas import AnalysisRequest, AnalysisResult
 from app.ai.service import (
     AIConfigurationError,
     AIProviderError,
+    AIProviderQuotaExceeded,
     AIProviderUnavailable,
     analyze_with_gemini,
 )
@@ -27,6 +28,11 @@ def analyze(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI analysis is not configured on this server.",
+        )
+    except AIProviderQuotaExceeded:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Gemini daily quota is exhausted. Check provider quota before retrying.",
         )
     except AIProviderUnavailable:
         raise HTTPException(

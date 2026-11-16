@@ -20,6 +20,10 @@ from app.security.dependencies import (
     get_current_membership,
 )
 from app.action_engine.execution_queue import enqueue_action
+from app.action_engine.platform_emergency_stop import (
+    is_platform_emergency_stop_active,
+    PlatformEmergencyStopStateUnavailable,
+)
 from app.action_engine.execution_lifecycle import transition_execution
 from app.action_engine.emergency_stop import (
     is_emergency_stop_active,
@@ -118,14 +122,29 @@ def queue_action(
         .filter(
             AssetAuthorization.asset_id == asset.id,
             AssetAuthorization.organization_id == membership.organization_id,
-            AssetAuthorization.status == "verified",
         )
         .order_by(
-            AssetAuthorization.reviewed_at.desc(),
+            AssetAuthorization.updated_at.desc(),
             AssetAuthorization.created_at.desc(),
         )
         .first()
     )
+
+    # The platform-wide stop is the outermost execution safety gate.
+    # Missing, malformed, or unreadable platform state must fail closed.
+    try:
+        platform_stop_active = is_platform_emergency_stop_active(db=db)
+    except PlatformEmergencyStopStateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Execution queue unavailable because platform Emergency Stop state could not be verified.",
+        ) from exc
+
+    if platform_stop_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Platform Emergency Stop is active. New execution queue requests are blocked.",
+        )
 
     try:
         emergency_stop = is_emergency_stop_active(

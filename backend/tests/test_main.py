@@ -6,12 +6,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.main import app
+import app.main as main_module
 from app.database.base import Base
 from app.database.session import get_db
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     test_engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -34,6 +35,7 @@ def client():
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    monkeypatch.setattr(main_module, "engine", test_engine)
 
     with TestClient(app) as test_client:
         yield test_client
@@ -173,3 +175,4 @@ def test_asset_registration_requires_authorization(client):
     )
 
     assert response.status_code == 400
+

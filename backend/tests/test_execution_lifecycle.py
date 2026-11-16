@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -51,18 +51,28 @@ def create_execution(db, status="queued"):
     return record
 
 
-def test_queued_execution_can_transition_to_running(db_session):
+def test_queued_execution_cannot_transition_to_running(db_session):
     record = create_execution(db_session)
 
-    updated = transition_execution(
-        db_session,
-        record.id,
-        "running",
-    )
+    with pytest.raises(ValueError, match="Execution start is disabled"):
+        transition_execution(
+            db_session,
+            record.id,
+            "running",
+        )
 
-    assert updated.status == "running"
-    assert updated.started_at is not None
-    assert updated.completed_at is None
+    db_session.refresh(record)
+
+    assert record.status == "queued"
+    assert record.started_at is None
+    assert record.completed_at is None
+
+    events = (
+        db_session.query(ExecutionLifecycleEvent)
+        .filter(ExecutionLifecycleEvent.execution_id == record.id)
+        .all()
+    )
+    assert events == []
 
 
 def test_running_execution_can_transition_to_completed(db_session):
@@ -168,7 +178,7 @@ def test_transition_creates_lifecycle_event_with_actor(db_session):
     updated = transition_execution(
         db_session,
         record.id,
-        "running",
+        "cancelled",
         actor_id=actor_id,
     )
 
@@ -178,12 +188,12 @@ def test_transition_creates_lifecycle_event_with_actor(db_session):
         .all()
     )
 
-    assert updated.status == "running"
+    assert updated.status == "cancelled"
     assert len(events) == 1
     assert events[0].organization_id == record.organization_id
     assert events[0].actor_id == actor_id
     assert events[0].from_status == "queued"
-    assert events[0].to_status == "running"
+    assert events[0].to_status == "cancelled"
     assert events[0].event_type == "status_transition"
 
 
@@ -193,7 +203,7 @@ def test_rollback_reverts_transition_and_lifecycle_event(db_session):
     transition_execution(
         db_session,
         record.id,
-        "running",
+        "cancelled",
         actor_id="test-actor-002",
     )
 

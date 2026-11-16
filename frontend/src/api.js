@@ -88,7 +88,14 @@ async function loadOrganizations(accessToken) {
     error.status = response.status;
     throw error;
   }
-  return Array.isArray(payload) ? payload : [];
+  // The API may return either a list of memberships or one membership object.
+  // Normalize both response shapes so the selected organization is persisted.
+  if (Array.isArray(payload)) return payload;
+  if (payload && typeof payload === "object" && payload.organization_id) return [payload];
+  if (payload && typeof payload === "object" && Array.isArray(payload.organizations)) {
+    return payload.organizations;
+  }
+  return [];
 }
 
 export async function authenticate(email, password) {

@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import update
 
@@ -6,7 +6,7 @@ from app.models import ExecutionRecord, ExecutionLifecycleEvent
 
 
 ALLOWED_TRANSITIONS = {
-    "queued": {"running", "cancelled"},
+    "queued": {"cancelled"},
     "running": {"completed", "failed"},
     "completed": set(),
     "failed": set(),
@@ -39,6 +39,10 @@ def transition_execution(db, execution_id: str, target_status: str, actor_id: st
 
     current_status = record.status
 
+    if current_status == "queued" and target_status == "running":
+        raise ValueError(
+            "Execution start is disabled: no dedicated security-action worker is registered."
+        )
     allowed_targets = ALLOWED_TRANSITIONS.get(current_status)
 
     if allowed_targets is None or target_status not in allowed_targets:

@@ -106,3 +106,63 @@ def test_analysis_result_requires_advisory_flags():
     })
     assert result.requires_human_review is True
     assert result.advisory_only is True
+
+
+# CYVANTA_AI_HTTP_ERROR_TESTS
+@pytest.mark.parametrize(
+    "exception_type, expected_status, expected_retry_after",
+    [
+        ("quota", 429, None),
+        ("temporary", 503, "30"),
+        ("provider", 502, None),
+    ],
+)
+def test_ai_provider_http_error_mapping(
+    client, monkeypatch, exception_type, expected_status, expected_retry_after
+):
+    from app.ai import service
+    from app.api import ai as ai_api
+
+    exceptions = {
+        "quota": service.AIProviderQuotaExceeded,
+        "temporary": service.AIProviderUnavailable,
+        "provider": service.AIProviderError,
+    }
+
+    def fake_analyze(*args):
+        raise exceptions[exception_type]("Private provider information")
+
+    monkeypatch.setattr(ai_api, "analyze_with_gemini", fake_analyze)
+
+    headers = register_and_login(client)
+    response = client.post(
+        "/api/v1/ai/analyze",
+        headers=headers,
+        json={
+            "analysis_type": "security_finding",
+            "evidence_text": "A test server has an unverified outdated configuration.",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert response.headers.get("retry-after") == expected_retry_after
+    assert "Private provider information" not in response.text
+
+
+def test_ai_provider_failure_does_not_bypass_authentication(client, monkeypatch):
+    from app.api import ai as ai_api
+
+    def should_not_run(*args):
+        pytest.fail("Unauthenticated request must not invoke Gemini")
+
+    monkeypatch.setattr(ai_api, "analyze_with_gemini", should_not_run)
+
+    response = client.post(
+        "/api/v1/ai/analyze",
+        json={
+            "analysis_type": "security_finding",
+            "evidence_text": "A test server has an unverified outdated configuration.",
+        },
+    )
+
+    assert response.status_code == 401

@@ -18,6 +18,7 @@ from app.security.auth import (
 )
 from app.security.dependencies import get_current_user
 from app.core.config import settings
+from app.security.security_signals import record_failed_login_signal
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -111,7 +112,7 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    email = str(data.email).lower()
+    email = str(data.email).strip().casefold()
 
     user = db.query(User).filter(User.email == email).first()
 
@@ -120,6 +121,13 @@ def login(
         or not user.is_active
         or not verify_password(data.password, user.password_hash)
     ):
+        record_failed_login_signal(
+            db=db,
+            account_identifier=email,
+            source_ip=request.client.host if request.client else None,
+            hmac_key=settings.security_event_hmac_key,
+        )
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password.",

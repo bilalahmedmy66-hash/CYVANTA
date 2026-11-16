@@ -44,39 +44,73 @@ def redact_secrets(text: str) -> str:
     return cleaned
 
 
+def _provider_error_metadata(exc: Exception) -> tuple[int | None, str, list]:
+    """Extract structured provider status and quota metadata."""
+    code = getattr(exc, "code", None)
+    if not isinstance(code, int):
+        code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if not isinstance(code, int):
+        candidate = getattr(response, "status_code", None)
+        code = candidate if isinstance(candidate, int) else None
+
+    details = getattr(exc, "details", None)
+    payload = details.get("error", details) if isinstance(details, dict) else {}
+    status = getattr(exc, "status", None)
+    if not isinstance(status, str) and isinstance(payload, dict):
+        status = payload.get("status")
+    status = status.upper() if isinstance(status, str) else ""
+    quota_details = payload.get("details", []) if isinstance(payload, dict) else []
+    return code, status, quota_details if isinstance(quota_details, list) else []
+
+
+def _flatten_quota_metadata(value) -> str:
+    """Flatten only structured quota metadata; never parse arbitrary exception text."""
+    if isinstance(value, dict):
+        return " ".join(
+            f"{key} {_flatten_quota_metadata(item)}" for key, item in value.items()
+        ).lower()
+    if isinstance(value, (list, tuple)):
+        return " ".join(_flatten_quota_metadata(item) for item in value).lower()
+    return value.lower() if isinstance(value, str) else ""
+
+
 def _is_quota_exhaustion(exc: Exception) -> bool:
-    """Detect quota/rate-limit exhaustion before temporary-outage classification."""
-    candidates = [
-        getattr(exc, "code", None),
-        getattr(exc, "status_code", None),
-        getattr(getattr(exc, "response", None), "status_code", None),
-        str(exc),
-    ]
-    normalized = " ".join(str(value) for value in candidates if value is not None).lower()
-    return any(marker in normalized for marker in (
-        "429", "resource_exhausted", "quota_exceeded", "quota exceeded",
-        "rate_limit", "rate limit",
-    ))
+    """Only classify an explicitly identified daily quota as terminal."""
+    code, _status, quota_details = _provider_error_metadata(exc)
+    if code != 429:
+        return False
+
+    daily_markers = (
+        "daily", "per day", "per_day", "day quota",
+        "requests/day", "request/day", "dailyquota", "perday",
+    )
+    short_window_markers = (
+        "per minute", "per-minute", "per_minute", "minute",
+        "per second", "per-second", "per_second",
+    )
+    for item in quota_details:
+        if not isinstance(item, dict):
+            continue
+        if "quotafailure" not in str(item.get("@type", "")).lower():
+            continue
+        metadata = _flatten_quota_metadata(item)
+        if any(marker in metadata for marker in daily_markers) and not any(
+            marker in metadata for marker in short_window_markers
+        ):
+            return True
+    return False
 
 
 def _is_temporary_provider_failure(exc: Exception) -> bool:
-    """Identify temporary HTTP/provider failures without exposing provider details."""
-    candidates = [
-        getattr(exc, "code", None),
-        getattr(exc, "status_code", None),
-        getattr(getattr(exc, "response", None), "status_code", None),
-        str(exc),
-    ]
-    normalized = " ".join(str(value) for value in candidates if value is not None).lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "429", "500", "502", "503", "504",
-            "resource_exhausted", "service_unavailable",
-            "deadline_exceeded", "temporarily unavailable", "high demand",
-        )
-    )
-
+    """Identify retryable HTTP/provider failures from structured status fields."""
+    code, status, _quota_details = _provider_error_metadata(exc)
+    if code in (429, 500, 502, 503, 504):
+        return True
+    return status in {
+        "RESOURCE_EXHAUSTED", "SERVICE_UNAVAILABLE",
+        "DEADLINE_EXCEEDED", "INTERNAL",
+    }
 
 def _provider_response_schema() -> dict:
     """Return a Gemini-compatible schema; final enforcement remains Pydantic-side."""

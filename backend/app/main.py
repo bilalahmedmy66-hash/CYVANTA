@@ -1,20 +1,31 @@
-from contextlib import asynccontextmanager
+﻿from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.database.base import Base
 from app.database.session import engine
-from app.database.migrations import ensure_ai_analysis_job_retry_column
+from app.database.migrations import (
+    ensure_ai_analysis_job_retry_column,
+    ensure_active_defense_migrations,
+    ensure_security_signals_migrations,
+    ensure_platform_detection_migrations,
+    ensure_simulation_dispatch_migrations,
+)
 from app import models
-from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations, organizations, intelligence_graph, ai, ai_jobs
+from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations, organizations, intelligence_graph, ai, ai_jobs, platform_emergency_stops, platform_detection_findings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    ensure_ai_analysis_job_retry_column(engine)
-    yield
+        Base.metadata.create_all(bind=engine)
+        ensure_ai_analysis_job_retry_column(engine)
+        ensure_active_defense_migrations(engine)
+        ensure_security_signals_migrations(engine)
+        ensure_platform_detection_migrations(engine)
+        ensure_simulation_dispatch_migrations(engine)
+        yield
 
 
 app = FastAPI(
@@ -26,6 +37,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(organizations.router, prefix="/api/v1")
 app.include_router(intelligence_graph.router, prefix="/api/v1")
@@ -36,6 +61,8 @@ app.include_router(asset_authorizations.router, prefix="/api/v1")
 app.include_router(missions.router)
 app.include_router(executions.router)
 app.include_router(emergency_stops.router, prefix="/api/v1")
+app.include_router(platform_emergency_stops.router, prefix="/api/v1")
+app.include_router(platform_detection_findings.router, prefix="/api/v1")
 
 
 @app.get("/", tags=["System"])
@@ -63,3 +90,7 @@ def system_info():
         "version": settings.app_version,
         "environment": settings.app_env,
     }
+
+
+
+
