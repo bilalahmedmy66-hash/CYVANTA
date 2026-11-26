@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -10,13 +10,9 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Activity, AlertTriangle, Database, Maximize2, RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { Activity, AlertTriangle, Database, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { apiRequest } from "./api";
 
-const TYPE_ORDER = [
-  "organization", "member", "asset", "authorization", "authorization_event",
-  "mission", "action", "approval", "execution", "execution_event",
-];
 
 const TYPE_LABELS = {
   organization: "ORGANIZATION",
@@ -217,7 +213,44 @@ export default function IntelligenceGraph() {
     }
   }, [setEdges, setNodes]);
 
-  useEffect(() => { loadGraph(); }, [loadGraph]);
+  useEffect(() => {
+    let active = true;
+
+    async function loadInitialGraph() {
+      try {
+        const result = await apiRequest("/intelligence-graph");
+
+        if (!result || !Array.isArray(result.nodes) || !Array.isArray(result.edges)) {
+          throw new Error("The graph API returned an unexpected response structure.");
+        }
+
+        const layout = forceLayout(result.nodes, result.edges);
+
+        if (!active) return;
+
+        setPayload(result);
+        setNodes(layout.nodes);
+        setEdges(layout.edges);
+        setSelected(null);
+        setError("");
+      } catch (loadError) {
+        if (!active) return;
+        setError(loadError?.message || "Unable to load the organization graph.");
+        setPayload(null);
+        setNodes([]);
+        setEdges([]);
+        setSelected(null);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadInitialGraph();
+
+    return () => {
+      active = false;
+    };
+  }, [setEdges, setNodes]);
 
   const selectedNode = useMemo(
     () => selected ? nodes.find((node) => node.id === selected) || null : null,

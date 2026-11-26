@@ -1,11 +1,10 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertCircle,
   AlertTriangle,
   ArrowDown,
   ArrowUpRight,
-  Bell,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -18,7 +17,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   X,
-  XCircle,
 } from "lucide-react";
 import {
   Area,
@@ -33,6 +31,18 @@ import { apiRequest } from "./api";
 import "./DetectionDashboard.css";
 
 const PAGE_SIZE = 10;
+
+async function fetchFindingsPage(page, statusFilter, severityFilter) {
+  const params = new URLSearchParams({
+    limit: String(PAGE_SIZE),
+    offset: String(page * PAGE_SIZE),
+  });
+
+  if (statusFilter) params.set("status", statusFilter);
+  if (severityFilter) params.set("severity", severityFilter);
+
+  return apiRequest(`/platform/detections?${params.toString()}`);
+}
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
@@ -166,11 +176,6 @@ function FindingDetails({ finding, onClose, onAction, busy }) {
   const [reason, setReason] = useState("");
   const [formError, setFormError] = useState("");
 
-  useEffect(() => {
-    setAction("");
-    setReason("");
-    setFormError("");
-  }, [finding?.id]);
 
   if (!finding) return null;
 
@@ -334,15 +339,7 @@ export default function DetectionDashboard() {
     setError("");
 
     try {
-      const params = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(page * PAGE_SIZE),
-      });
-
-      if (statusFilter) params.set("status", statusFilter);
-      if (severityFilter) params.set("severity", severityFilter);
-
-      const result = await apiRequest(`/platform/detections?${params.toString()}`);
+      const result = await fetchFindingsPage(page, statusFilter, severityFilter);
 
       setFindings(Array.isArray(result.items) ? result.items : []);
       setTotal(Number(result.total) || 0);
@@ -358,8 +355,34 @@ export default function DetectionDashboard() {
   }, [page, statusFilter, severityFilter]);
 
   useEffect(() => {
-    loadFindings();
-  }, [loadFindings]);
+    let active = true;
+
+    async function loadInitialFindings() {
+      try {
+        const result = await fetchFindingsPage(page, statusFilter, severityFilter);
+
+        if (!active) return;
+
+        setFindings(Array.isArray(result.items) ? result.items : []);
+        setTotal(Number(result.total) || 0);
+        setLastUpdated(new Date());
+        setError("");
+      } catch (err) {
+        if (!active) return;
+        setError(getErrorMessage(err));
+        setFindings([]);
+        setTotal(0);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadInitialFindings();
+
+    return () => {
+      active = false;
+    };
+  }, [page, statusFilter, severityFilter]);
 
   const filteredFindings = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -448,7 +471,7 @@ export default function DetectionDashboard() {
       await loadFindings({ quiet: true });
       return updated;
     } catch (err) {
-      throw new Error(getErrorMessage(err));
+      throw new Error(getErrorMessage(err), { cause: err });
     } finally {
       setActionBusy(false);
     }
@@ -555,14 +578,14 @@ export default function DetectionDashboard() {
 
           <label className="detection-select-wrap">
             <Filter size={14} />
-            <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(0); }}>
+            <select value={statusFilter} onChange={(event) => { setLoading(true); setStatusFilter(event.target.value); setPage(0); }}>
               {STATUS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </label>
 
           <label className="detection-select-wrap">
             <AlertCircle size={14} />
-            <select value={severityFilter} onChange={(event) => { setSeverityFilter(event.target.value); setPage(0); }}>
+            <select value={severityFilter} onChange={(event) => { setLoading(true); setSeverityFilter(event.target.value); setPage(0); }}>
               <option value="">All severities</option>
               {SEVERITY_ORDER.map((value) => <option key={value} value={value}>{SEVERITY_META[value].label}</option>)}
             </select>
@@ -613,9 +636,9 @@ export default function DetectionDashboard() {
         <div className="detection-table-footer">
           <span>Showing {filteredFindings.length} of {total} matching records</span>
           <div className="detection-pagination">
-            <button disabled={page <= 0 || loading} onClick={() => setPage((value) => Math.max(0, value - 1))}><ChevronLeft size={15} /> Previous</button>
+            <button disabled={page <= 0 || loading} onClick={() => { setLoading(true); setPage((value) => Math.max(0, value - 1)); }}><ChevronLeft size={15} /> Previous</button>
             <span>Page {page + 1} / {pageCount}</span>
-            <button disabled={(page + 1) * PAGE_SIZE >= total || loading} onClick={() => setPage((value) => value + 1)}>Next <ChevronRight size={15} /></button>
+            <button disabled={(page + 1) * PAGE_SIZE >= total || loading} onClick={() => { setLoading(true); setPage((value) => value + 1); }}>Next <ChevronRight size={15} /></button>
           </div>
         </div>
       </section>
@@ -627,6 +650,7 @@ export default function DetectionDashboard() {
 
       {selected && (
         <FindingDetails
+          key={selected.id}
           finding={selected}
           onClose={() => setSelected(null)}
           onAction={handleAction}

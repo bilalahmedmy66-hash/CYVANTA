@@ -35,6 +35,23 @@ def db():
 
 
 def create_job(db, status="processing", evidence="A server reports an outdated TLS configuration."):
+    from app.models import AIExternalAnalysisPolicy
+
+    policy = (
+        db.query(AIExternalAnalysisPolicy)
+        .filter_by(organization_id=db.info["organization_id"])
+        .first()
+    )
+    if policy is None:
+        policy = AIExternalAnalysisPolicy(
+            organization_id=db.info["organization_id"],
+            external_analysis_enabled=True,
+        )
+        db.add(policy)
+    else:
+        policy.external_analysis_enabled = True
+    db.commit()
+
     job = AIAnalysisJob(
         organization_id=db.info["organization_id"],
         submitted_by=db.info["user_id"],

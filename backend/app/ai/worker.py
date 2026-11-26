@@ -12,6 +12,7 @@ from datetime import timedelta
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.ai.policy import external_analysis_is_enabled
 from app.ai.service import (
     AIConfigurationError,
     AIProviderError,
@@ -184,6 +185,9 @@ def process_job(db: Session, job_id: str) -> None:
     if not evidence:
         _finish_failed_job(db, job, "EVIDENCE_UNAVAILABLE")
         return
+    if not external_analysis_is_enabled(db, job.organization_id):
+        _finish_failed_job(db, job, "EXTERNAL_ANALYSIS_NOT_AUTHORIZED")
+        return
     try:
         result = analyze_with_gemini(analysis_type, evidence)
     except AIConfigurationError:
@@ -223,6 +227,9 @@ def process_claimed_job(job_id: str) -> None:
         attempts = job.attempts
         if not evidence:
             _finish_failed_job(db, job, "EVIDENCE_UNAVAILABLE")
+            return
+        if not external_analysis_is_enabled(db, job.organization_id):
+            _finish_failed_job(db, job, "EXTERNAL_ANALYSIS_NOT_AUTHORIZED")
             return
     finally:
         db.close()

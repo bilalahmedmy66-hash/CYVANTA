@@ -328,3 +328,221 @@ def ensure_simulation_dispatch_migrations(engine):
             """),
             {"version": SIMULATION_DISPATCH_MIGRATION_VERSION},
         )
+
+# ==========================================
+# CYVANTA AUDIT LOG IMMUTABILITY MIGRATION V1
+# ==========================================
+
+AUDIT_LOG_MIGRATION_VERSION = (
+    "20261118_001_audit_logs_immutability"
+)
+
+
+def ensure_audit_log_migrations(engine):
+    """
+    Protect audit_logs against UPDATE and DELETE.
+    Safe to rerun on SQLite.
+    """
+
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS cyvanta_schema_migrations (
+                version VARCHAR(120) PRIMARY KEY,
+                applied_at DATETIME NOT NULL
+            )
+        """))
+
+        applied = connection.execute(
+            text("""
+                SELECT 1
+                FROM cyvanta_schema_migrations
+                WHERE version = :version
+            """),
+            {"version": AUDIT_LOG_MIGRATION_VERSION},
+        ).first()
+
+        if applied:
+            return
+
+        existing = set(inspect(connection).get_table_names())
+
+        if "audit_logs" not in existing:
+            raise RuntimeError("Missing audit_logs table")
+
+        connection.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS prevent_audit_logs_update
+            BEFORE UPDATE ON audit_logs
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'append-only audit history cannot be updated'
+                );
+            END
+        """))
+
+        connection.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS prevent_audit_logs_delete
+            BEFORE DELETE ON audit_logs
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'append-only audit history cannot be deleted'
+                );
+            END
+        """))
+
+        connection.execute(
+            text("""
+                INSERT INTO cyvanta_schema_migrations
+                    (version, applied_at)
+                VALUES (:version, CURRENT_TIMESTAMP)
+            """),
+            {"version": AUDIT_LOG_MIGRATION_VERSION},
+        )
+
+# CYVANTA_LOGIN_RATE_LIMIT_MIGRATION_V1
+
+LOGIN_RATE_LIMIT_MIGRATION_VERSION = (
+    "20261118_002_login_rate_limits"
+)
+
+
+def ensure_login_rate_limit_migrations(engine):
+    """
+    Create mutable login rate-limit buckets.
+    Raw IP addresses and account identifiers are never stored.
+    Safe to rerun on SQLite.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS cyvanta_schema_migrations (
+                version VARCHAR(120) PRIMARY KEY,
+                applied_at DATETIME NOT NULL
+            )
+        """))
+
+        applied = connection.execute(
+            text("""
+                SELECT 1
+                FROM cyvanta_schema_migrations
+                WHERE version = :version
+            """),
+            {"version": LOGIN_RATE_LIMIT_MIGRATION_VERSION},
+        ).first()
+
+        if applied:
+            return
+
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS login_rate_limits (
+                scope VARCHAR(30) NOT NULL,
+                fingerprint VARCHAR(64) NOT NULL,
+                window_started_at DATETIME NOT NULL,
+                attempts INTEGER NOT NULL CHECK (attempts > 0),
+                PRIMARY KEY (scope, fingerprint)
+            )
+        """))
+
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                "login_rate_limits"
+            )
+        }
+
+        required_columns = {
+            "scope",
+            "fingerprint",
+            "window_started_at",
+            "attempts",
+        }
+
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "login_rate_limits table has an invalid schema."
+            )
+
+        connection.execute(
+            text("""
+                INSERT INTO cyvanta_schema_migrations
+                    (version, applied_at)
+                VALUES (:version, CURRENT_TIMESTAMP)
+            """),
+            {"version": LOGIN_RATE_LIMIT_MIGRATION_VERSION},
+        )
+
+
+# CYVANTA_V2_AI_EXTERNAL_ANALYSIS_POLICY
+
+AI_EXTERNAL_ANALYSIS_POLICY_MIGRATION_VERSION = (
+    "20261126_001_ai_external_analysis_policy"
+)
+
+
+def ensure_ai_external_analysis_policy_migrations(engine):
+    """Create organization-scoped external AI authorization; Restricted by default."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS cyvanta_schema_migrations (
+                version VARCHAR(120) PRIMARY KEY,
+                applied_at DATETIME NOT NULL
+            )
+        """))
+
+        applied = connection.execute(
+            text("""
+                SELECT 1
+                FROM cyvanta_schema_migrations
+                WHERE version = :version
+            """),
+            {"version": AI_EXTERNAL_ANALYSIS_POLICY_MIGRATION_VERSION},
+        ).first()
+
+        if applied:
+            return
+
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS ai_external_analysis_policies (
+                organization_id VARCHAR(36) PRIMARY KEY
+                    REFERENCES organizations(id),
+                external_analysis_enabled BOOLEAN NOT NULL DEFAULT 0,
+                approved_by VARCHAR(36)
+                    REFERENCES users(id),
+                approved_at DATETIME
+            )
+        """))
+
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                "ai_external_analysis_policies"
+            )
+        }
+        required_columns = {
+            "organization_id",
+            "external_analysis_enabled",
+            "approved_by",
+            "approved_at",
+        }
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "ai_external_analysis_policies table has an invalid schema."
+            )
+
+        connection.execute(
+            text("""
+                INSERT INTO cyvanta_schema_migrations
+                    (version, applied_at)
+                VALUES (:version, CURRENT_TIMESTAMP)
+            """),
+            {"version": AI_EXTERNAL_ANALYSIS_POLICY_MIGRATION_VERSION},
+        )

@@ -9,6 +9,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     CheckConstraint,
+    Integer,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1048,3 +1049,57 @@ class PlatformDetectionFindingEvent(Base):
         nullable=False, index=True
     )
 
+class LoginRateLimit(Base):
+    """
+    Mutable authentication rate-limit buckets.
+    Stores HMAC fingerprints, never raw IPs or account identifiers.
+    """
+
+    __tablename__ = "login_rate_limits"
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempts > 0",
+            name="ck_login_rate_limits_attempts_positive",
+        ),
+    )
+
+    scope: Mapped[str] = mapped_column(
+        String(30),
+        primary_key=True,
+    )
+
+    fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+
+    window_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+
+
+class AIExternalAnalysisPolicy(Base):
+    """Organization-level authorization for external AI analysis."""
+
+    __tablename__ = "ai_external_analysis_policies"
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"), primary_key=True
+    )
+    external_analysis_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    approved_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

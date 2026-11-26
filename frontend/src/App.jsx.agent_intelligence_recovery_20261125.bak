@@ -1,0 +1,433 @@
+﻿import { lazy, Suspense, useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Activity, AlertOctagon, ArrowUpRight, Bell, Boxes, ChevronDown,
+  CircleDot, Command, Crosshair, Database, Fingerprint, Gauge, GitBranch,
+  Globe2, Hexagon, Layers3, LockKeyhole, Menu, Network, Radio, Search,
+  Settings2, Shield, ShieldAlert, ShieldCheck, ShieldEllipsis, MoreHorizontal,
+  SlidersHorizontal, X
+} from "lucide-react";
+import "./App.css";
+
+const CoreView = lazy(() => import("./IntelligenceCoreView"));
+const WorkspacePage = lazy(() => import("./WorkspacePage"));
+const OrganizationPage = lazy(() => import("./OrganizationPage"));
+const DetectionDashboard = lazy(() => import("./DetectionDashboard"));
+const AgentIntelligencePage = lazy(() => import("./AgentIntelligencePage"));import AuthGate from "./AuthGate";
+import { apiRequest, getSession } from "./api";
+
+
+const navigation = [
+  ["Command centre", Gauge, "OPERATIONS"],
+  ["Attack surface", Crosshair, "OPERATIONS"],
+  ["Detection & Alerts", Bell, "OPERATIONS"],
+  ["Authorizations", LockKeyhole, "GOVERNANCE"],
+  ["Execution queue", Activity, "GOVERNANCE"],
+  ["Intelligence graph", Network, "INTELLIGENCE"],
+  ["Agent Intelligence", Brain, "INTELLIGENCE"],
+  ["Evidence vault", Database, "INTELLIGENCE"],
+  ["Organization", Settings2, "GOVERNANCE"]
+];
+
+const pageMotion = {
+  hidden: { opacity: 0, y: 14 },
+  visible: (index) => ({
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.45, delay: index * 0.06, ease: "easeOut" }
+  })
+};
+
+function SparklinePlaceholder() {
+  return (
+    <div className="kpi-empty">
+      <svg viewBox="0 0 116 24" role="img" aria-label="No trend data available">
+        <path d="M1 18 H115" className="spark-base" />
+        <path d="M2 15 L18 15 L29 11 L42 17 L56 17 L68 8 L81 13 L94 13 L114 5" className="spark-dash" />
+      </svg>
+      <span>AWAITING DATA</span>
+    </div>
+  );
+}
+
+function Metric({ icon: Icon, label, note, index, value = "â€”", available = true }) {
+  return (
+    <motion.article className="metric" custom={index} variants={pageMotion} initial="hidden" animate="visible">
+      <div className="metric-top">
+        <span className="metric-icon"><Icon size={17} /></span>
+        <span className="metric-label">{label}</span>
+        <ArrowUpRight size={14} className="metric-arrow" />
+      </div>
+      <div className="metric-bottom">
+        <strong>{value}</strong>
+        {available ? <SparklinePlaceholder /> : <span className="kpi-unavailable">NOT AVAILABLE</span>}
+      </div>
+      <small>{note}</small>
+    </motion.article>
+  );
+}
+
+function isCurrentAuthorization(record, now = Date.now()) {
+  if (record?.status !== "verified") return false;
+  const starts = record.valid_from ? new Date(record.valid_from).getTime() : NaN;
+  const expires = record.expires_at ? new Date(record.expires_at).getTime() : NaN;
+  return Number.isFinite(starts) && Number.isFinite(expires) && starts <= now && now < expires;
+}
+
+function activityLabel(item) {
+  if (item.kind === "execution") {
+    return `Execution ${item.status || "updated"}`;
+  }
+  return item.action_type
+    ? `${String(item.action_type).replaceAll("_", " ")} Â· ${item.status || "requested"}`
+    : `Action ${item.status || "updated"}`;
+}
+
+function formatActivityTime(value) {
+  if (!value) return "Time unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Time unavailable"
+    : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+function Dashboard({ onSignOut }) {
+  const [operatorSession] = useState(() => getSession());
+  const operatorEmail = operatorSession?.profile?.email || "Authenticated operator";
+  const operatorName = operatorEmail.includes("@") ? operatorEmail.split("@")[0] : operatorEmail;
+  const operatorInitials = operatorName.split(/[._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "OP";
+  const [active, setActive] = useState("Command centre");
+  const [menuOpen, setMenuOpen] = useState(false);
+  // CYVANTA desktop sidebar toggle v8
+  const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false);
+  const [now, setNow] = useState(new Date());
+  const [apiStatus, setApiStatus] = useState("checking");
+  const [commandData, setCommandData] = useState({
+    loading: true,
+    error: "",
+    assets: [],
+    authorizations: [],
+    executions: [],
+    actions: []
+  });
+
+  useEffect(() => {
+    let active = true;
+
+    const checkApi = async () => {
+      try {
+        const result = await apiRequest("/health");
+        if (active && result?.status === "ok") {
+          setApiStatus("online");
+        } else if (active) {
+          setApiStatus("offline");
+        }
+      } catch {
+        if (active) setApiStatus("offline");
+      }
+    };
+
+    checkApi();
+    const healthTimer = window.setInterval(checkApi, 30000);
+
+    return () => {
+      active = false;
+      window.clearInterval(healthTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadCommandData = async () => {
+      try {
+        const [assetsResult, authorizationsResult, executionsResult, missionsResult] =
+          await Promise.allSettled([
+            apiRequest("/assets"),
+            apiRequest("/assets/authorizations"),
+            apiRequest("/executions"),
+            apiRequest("/missions")
+          ]);
+
+        const assets = assetsResult.status === "fulfilled" && Array.isArray(assetsResult.value)
+          ? assetsResult.value : [];
+        const authorizations = authorizationsResult.status === "fulfilled" && Array.isArray(authorizationsResult.value)
+          ? authorizationsResult.value : [];
+        const executions = executionsResult.status === "fulfilled" && Array.isArray(executionsResult.value)
+          ? executionsResult.value : [];
+        const missions = missionsResult.status === "fulfilled" && Array.isArray(missionsResult.value)
+          ? missionsResult.value : [];
+
+        const actionResults = await Promise.allSettled(
+          missions.map((mission) => apiRequest(`/missions/${encodeURIComponent(mission.id)}/actions`))
+        );
+        const actions = actionResults
+          .filter((result) => result.status === "fulfilled" && Array.isArray(result.value))
+          .flatMap((result) => result.value);
+
+        const failedSources = [
+          assetsResult, authorizationsResult, executionsResult, missionsResult
+        ].filter((result) => result.status === "rejected").length;
+
+        if (active) {
+          setCommandData({
+            loading: false,
+            error: failedSources ? `${failedSources} dashboard data source(s) could not be loaded.` : "",
+            assets,
+            authorizations,
+            executions,
+            actions
+          });
+        }
+      } catch (error) {
+        if (active) {
+          setCommandData((current) => ({
+            ...current,
+            loading: false,
+            error: error.message || "Dashboard data could not be loaded."
+          }));
+        }
+      }
+    };
+
+    loadCommandData();
+    const refreshTimer = window.setInterval(loadCommandData, 30000);
+
+    return () => {
+      active = false;
+      window.clearInterval(refreshTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const currentTimestamp = now.getTime();
+  const authorizedAssetIds = new Set(
+    commandData.authorizations
+      .filter((record) => isCurrentAuthorization(record, currentTimestamp))
+      .map((record) => record.asset_id)
+  );
+  const authorizedAssetCount = new Set(
+    commandData.assets
+      .filter((asset) => authorizedAssetIds.has(asset.id))
+      .map((asset) => asset.id)
+  ).size;
+  const activeExecutionCount = commandData.executions.filter(
+    (execution) => execution.status === "running"
+  ).length;
+  const pendingApprovalCount = commandData.actions.filter(
+    (action) => action.status === "pending_approval"
+  ).length;
+  const recentActivity = [
+    ...commandData.executions.map((item) => ({ ...item, kind: "execution" })),
+    ...commandData.actions.map((item) => ({ ...item, kind: "action" }))
+  ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 5);
+
+  const time = now.toLocaleTimeString("en-GB", { hour12: false });
+  const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+
+  return (
+    <div className={`shell${sidebarHidden ? " sidebar-collapsed" : ""}`}>
+      <aside className={`sidebar ${menuOpen ? "opened" : ""}`}>
+        <div className="brand">
+          <div className="brand-icon"><Hexagon size={25} /></div>
+          <div><b>CYVANTA</b><small>SECURITY INTELLIGENCE</small></div>
+          <button className="close-menu" onClick={() => setMenuOpen(false)} aria-label="Close menu"><X size={18} /></button>
+        </div>
+
+        <button className="workspace">
+          <span>C</span><div><b>Command workspace</b><small>Local environment</small></div><ChevronDown size={15} />
+        </button>
+
+        {["OPERATIONS", "GOVERNANCE", "INTELLIGENCE"].map((section) => (
+          <div className="nav-group" key={section}>
+            <label>{section}</label>
+            {navigation.filter((item) => item[2] === section).map(([name, Icon]) => (
+              <button key={name} title={name} className={`nav-item ${active === name ? "selected" : ""}`} onClick={() => { setActive(name); setMenuOpen(false); }}>
+                <Icon size={17} /><span>{name}</span>{name === "Execution queue" && <span className="nav-dash">â€”</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+
+        <div className="sidebar-end">
+          <div className="environment">
+            <label><i /> ENVIRONMENT STATUS</label>
+            <b>{apiStatus === "online" ? "Backend connected" : apiStatus === "offline" ? "Backend unavailable" : "Checking backend..."}</b>
+            <p>Connect an authorized environment to receive verified telemetry.</p>
+            <div><span>API CONNECTION</span><em>{apiStatus === "online" ? "CONNECTED" : apiStatus === "offline" ? "OFFLINE" : "CHECKING"}</em></div>
+          </div>
+          <button className="nav-item settings-item"><Settings2 size={17} /><span>Settings</span></button>
+          <div className="profile"><span>{operatorInitials}</span><div><b title={operatorEmail}>{operatorName}</b><small title={operatorSession?.organizationName || "No organization context"}>{operatorSession?.organizationName || operatorEmail}</small><small title={operatorEmail} style={{ overflowWrap: "anywhere" }}>{operatorEmail}</small></div><SlidersHorizontal size={16} /></div>
+          <button type="button" className="sidebar-account-signout" onClick={onSignOut} style={{ width: "100%", marginTop: 12, marginBottom: 14, padding: "11px 14px", border: "1px solid rgba(139,124,255,.28)", borderRadius: 12, background: "rgba(139,124,255,.10)", color: "#F1F5FF", cursor: "pointer", fontSize: 12, fontWeight: 700, letterSpacing: ".08em", textAlign: "left" }}>SIGN OUT</button>
+        </div>
+      </aside>
+
+      {menuOpen && <button className="scrim" onClick={() => setMenuOpen(false)} aria-label="Close navigation" />}
+
+      <main className="main">
+        <header className="topbar">
+          <div className="crumb"><button type="button" onClick={() => setSidebarHidden((hidden) => !hidden)} className="desktop-sidebar-toggle" aria-label={sidebarHidden ? "Show sidebar" : "Hide sidebar"} title={sidebarHidden ? "Show sidebar" : "Hide sidebar"}><MoreHorizontal size={20} /></button><button onClick={() => setMenuOpen(true)} className="mobile-menu" aria-label="Open menu"><Menu size={19} /></button> CYVANTA <span>/</span> <b>{active}</b></div>
+          <div className="top-actions">
+            <div className="clock"><b>{time}</b><small>{date} Â· LOCAL TIME</small></div>
+            <i className="divider" />
+            <button onClick={() => setSearchOpen(true)} aria-label="Search"><Search size={18} /></button>
+            <button className="bell" onClick={() => setNoticeOpen(!noticeOpen)} aria-label="Notifications"><Bell size={18} /><i /></button>
+            <span className="avatar" title={operatorEmail}>{operatorInitials}</span>
+          </div>
+        </header>
+
+        <Suspense fallback={<div className="content" role="status">Loading workspace moduleâ€¦</div>}>
+          {active === "Agent Intelligence" ? <AgentIntelligencePage /> : {active === "Detection & Alerts" ? <DetectionDashboard /> : active === "Organization" ? <OrganizationPage /> : active === "Command centre" ? <div className="content">
+          <section className="welcome">
+            <div>
+              <label><i /> AUTONOMOUS SECURITY OPERATIONS</label>
+              <h1>{active === "Command centre" ? <>See the whole <em>security picture.</em></> : active}</h1>
+              <p>One spatial environment for authorized security intelligence, controlled action and verifiable outcomes.</p>
+            </div>
+            <div className="standby"><i /> {apiStatus === "online" ? "API ONLINE" : apiStatus === "offline" ? "API OFFLINE" : "CHECKING API"} <span /> TELEMETRY NOT CONNECTED</div>
+          </section>
+
+          <section className="metrics">
+            <Metric
+              icon={ShieldCheck}
+              label="AUTHORIZED ASSETS"
+              value={commandData.loading ? "â€¦" : authorizedAssetCount}
+              note="Verified and within authorization dates"
+              index={0}
+              available={!commandData.loading}
+            />
+            <Metric
+              icon={Activity}
+              label="ACTIVE EXECUTIONS"
+              value={commandData.loading ? "â€¦" : activeExecutionCount}
+              note="Executions currently running"
+              index={1}
+              available={!commandData.loading}
+            />
+            <Metric
+              icon={AlertOctagon}
+              label="OPEN FINDINGS"
+              value="â€”"
+              note="Organization-scoped findings source not available"
+              index={2}
+              available={false}
+            />
+            <Metric
+              icon={Fingerprint}
+              label="PENDING APPROVALS"
+              value={commandData.loading ? "â€¦" : pendingApprovalCount}
+              note="Action requests awaiting a decision"
+              index={3}
+              available={!commandData.loading}
+            />
+          </section>
+          {commandData.error && (
+            <div className="workspace-error" role="status">
+              Some Command Centre data could not be loaded. {commandData.error}
+            </div>
+          )}
+
+          <section className="spatial">
+            <motion.article className="panel spatial-panel" variants={pageMotion} initial="hidden" animate="visible" custom={4}>
+              <div className="panel-head"><div><label>01 / SPATIAL OVERVIEW</label><h2>Intelligence core</h2></div><span className="local"><Radio size={13} /> LOCAL VIEW</span></div>
+              <Suspense fallback={<div className="core-stage" role="status">Loading intelligence coreâ€¦</div>}>
+                <CoreView />
+              </Suspense>
+              <div className="legend"><span><i className="cyan" /> INTELLIGENCE LAYER</span><span><i className="violet" /> CONTROL LAYER</span><span><i className="grey" /> AWAITING TELEMETRY</span></div>
+            </motion.article>
+
+            <div className="right-stack">
+              <motion.article className="panel" variants={pageMotion} initial="hidden" animate="visible" custom={5}>
+                <div className="panel-head"><div><label>02 / CONTROL POSTURE</label><h2>Operational safeguards</h2></div><Shield size={17} /></div>
+                <div className="safeguards">
+                  {[
+                    [LockKeyhole, "Authorization gate", "Required before any action", "ENFORCED", "success"],
+                    [ShieldEllipsis, "Least privilege", "Scoped access model", "ENFORCED", "success"],
+                    [GitBranch, "Audit trail", "Append-only event history", "ENABLED", "info"],
+                    [ShieldAlert, "Emergency stop", "Control available to operators", "AVAILABLE", "violet"]
+                  ].map(([Icon, title, desc, state, tone]) => (
+                    <div className="safe-row" key={title}>
+                      <span className="safe-icon"><Icon size={16} /></span>
+                      <div><b>{title}</b><small>{desc}</small></div>
+                      <em className={tone}>{state}</em>
+                    </div>
+                  ))}
+                </div>
+                <p className="safe-note"><CircleDot size={13} /> Safeguard configuration shown; runtime health awaits backend verification.</p>
+              </motion.article>
+
+              <motion.article className="panel activity" variants={pageMotion} initial="hidden" animate="visible" custom={6}>
+                <div className="panel-head"><div><label>03 / EVENT STREAM</label><h2>Recent activity</h2></div><span className="stream"><i /> {commandData.loading ? "SYNCING" : recentActivity.length ? "LIVE DATA" : "NO EVENTS"}</span></div>
+                {commandData.loading ? (
+                  <div className="empty"><Radio size={20} /><b>Loading organization activity</b><p>Retrieving scoped action and execution records.</p></div>
+                ) : recentActivity.length ? (
+                  <div className="cc-activity-list">
+                    {recentActivity.map((item) => (
+                      <div className="cc-activity-row" key={`${item.kind}-${item.id}`}>
+                        <span className="cc-activity-dot" />
+                        <div><b>{activityLabel(item)}</b><small>{item.description || item.id}</small></div>
+                        <time>{formatActivityTime(item.created_at)}</time>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty"><Radio size={20} /><b>No recent action or execution records</b><p>New organization activity will appear here when recorded.</p></div>
+                )}
+              </motion.article>
+            </div>
+          </section>
+
+          <section className="bottom">
+            <motion.article className="panel" variants={pageMotion} initial="hidden" animate="visible" custom={7}>
+              <div className="panel-head"><div><label>04 / ENVIRONMENT</label><h2>Connected surface</h2></div><Globe2 size={17} /></div>
+              <div className="empty-inline">
+                <Boxes size={18} />
+                <b>{commandData.loading ? "Loading registered assets" : `${commandData.assets.length} registered assets`}</b>
+                <small>{commandData.loading
+                  ? "Retrieving assets for the selected organization."
+                  : `${authorizedAssetCount} currently authorized Â· ${Math.max(0, commandData.assets.length - authorizedAssetCount)} not currently authorized`}</small>
+              </div>
+            </motion.article>
+            <motion.article className="panel" variants={pageMotion} initial="hidden" animate="visible" custom={8}>
+              <div className="panel-head"><div><label>05 / INTELLIGENCE</label><h2>Relationship graph</h2></div><Network size={17} /></div>
+              <div className="empty-inline"><Layers3 size={18} /><b>Graph is not populated</b><small>Verified entities and relationships will render here.</small></div>
+            </motion.article>
+          </section>
+
+          <footer><b>CYVANTA</b> SECURITY OPERATIONS PLATFORM <span>AUTHORIZED ENVIRONMENTS ONLY &nbsp; â€¢ &nbsp; CONTROL & ACCOUNTABILITY</span></footer>
+        </div> : <WorkspacePage active={active} />}
+        </Suspense>
+      </main>
+
+      <AnimatePresence>
+        {searchOpen && <motion.div className="modal-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSearchOpen(false)}>
+          <motion.div className="search-modal" initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 12, opacity: 0 }} onClick={(event) => event.stopPropagation()}>
+            <div><Command size={16} /> QUICK SEARCH <button onClick={() => setSearchOpen(false)} aria-label="Close search"><X size={17} /></button></div>
+            <section><Search size={18} /><input autoFocus placeholder="Search assets, authorizations, evidence..." /></section>
+            <p>Search will connect to CYVANTA data services in a later integration step.</p>
+          </motion.div>
+        </motion.div>}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {noticeOpen && <motion.div className="notice" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+          <b>Notifications</b><p>No verified notifications have been received.</p><button onClick={() => setNoticeOpen(false)}>Close</button>
+        </motion.div>}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function App() {
+  return <AuthGate><Dashboard /></AuthGate>;
+}
+
+export default App;
+
+

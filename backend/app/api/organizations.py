@@ -1,4 +1,5 @@
-﻿import hashlib
+﻿
+import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -21,16 +22,29 @@ from app.schemas import (
 )
 from app.security.dependencies import get_current_user, get_current_membership
 
-router = APIRouter(prefix="/organizations", tags=["Organization Membership"])
+
+router = APIRouter(
+    prefix="/organizations",
+    tags=["Organization Membership"],
+)
 
 
 def _utc(value):
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
+
     return value.astimezone(timezone.utc)
 
 
-def _audit(db, action, user_id, organization_id, target_id, details, request):
+def _audit(
+    db,
+    action,
+    user_id,
+    organization_id,
+    target_id,
+    details,
+    request,
+):
     db.add(
         AuditLog(
             user_id=user_id,
@@ -53,35 +67,59 @@ def create_invitation(
     db: Session = Depends(get_db),
 ):
     if membership.role != "owner":
-        raise HTTPException(status_code=403, detail="Organization owner permission required.")
+        raise HTTPException(
+            status_code=403,
+            detail="Organization owner permission required.",
+        )
 
     email = str(data.email).strip().lower()
-    if email == user.email.lower():
-        raise HTTPException(status_code=400, detail="You cannot invite yourself.")
 
-    existing_user = db.query(User).filter(User.email == email).first()
+    if email == user.email.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot invite yourself.",
+        )
+
+    existing_user = db.query(User).filter(
+        User.email == email
+    ).first()
+
     if existing_user:
         existing_membership = db.query(Membership).filter(
             Membership.user_id == existing_user.id,
             Membership.organization_id == membership.organization_id,
         ).first()
+
         if existing_membership:
-            raise HTTPException(status_code=409, detail="This user is already an organization member.")
+            raise HTTPException(
+                status_code=409,
+                detail="This user is already an organization member.",
+            )
 
     now = datetime.now(timezone.utc)
+
     active_invitation = db.query(OrganizationInvitation).filter(
         OrganizationInvitation.organization_id == membership.organization_id,
         OrganizationInvitation.email == email,
         OrganizationInvitation.accepted_at.is_(None),
         OrganizationInvitation.revoked_at.is_(None),
     ).all()
+
     for previous in active_invitation:
         if _utc(previous.expires_at) > now:
-            raise HTTPException(status_code=409, detail="An active invitation already exists for this email.")
+            raise HTTPException(
+                status_code=409,
+                detail="An active invitation already exists for this email.",
+            )
+
         previous.revoked_at = now
 
     raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    token_hash = hashlib.sha256(
+        raw_token.encode("utf-8")
+    ).hexdigest()
+
     invitation = OrganizationInvitation(
         organization_id=membership.organization_id,
         email=email,
@@ -90,6 +128,7 @@ def create_invitation(
         expires_at=now + timedelta(hours=48),
         created_by=user.id,
     )
+
     db.add(invitation)
     db.flush()
 
@@ -99,13 +138,19 @@ def create_invitation(
         user.id,
         membership.organization_id,
         invitation.id,
-        {"email": email, "role": "reviewer", "expires_at": invitation.expires_at.isoformat()},
+        {
+            "email": email,
+            "role": "reviewer",
+            "expires_at": invitation.expires_at.isoformat(),
+        },
         request,
     )
 
-    # No email provider is configured. Expose the raw token only in development.
+    # No email provider is configured.
+    # Expose the raw token only in development/test environments.
     if settings.app_env.lower() not in ("development", "dev", "test"):
         db.rollback()
+
         raise HTTPException(
             status_code=503,
             detail="Invitation delivery is not configured for this environment.",
@@ -113,6 +158,7 @@ def create_invitation(
 
     db.commit()
     db.refresh(invitation)
+
     return {
         "id": invitation.id,
         "organization_id": invitation.organization_id,
@@ -121,7 +167,10 @@ def create_invitation(
         "expires_at": invitation.expires_at,
         "delivery_mode": "development_handoff",
         "invitation_token": raw_token,
-        "message": "Development handoff only. Share this token securely with the invited person.",
+        "message": (
+            "Development handoff only. "
+            "Share this token securely with the invited person."
+        ),
     }
 
 
@@ -131,11 +180,16 @@ def list_invitations(
     db: Session = Depends(get_db),
 ):
     if membership.role != "owner":
-        raise HTTPException(status_code=403, detail="Organization owner permission required.")
+        raise HTTPException(
+            status_code=403,
+            detail="Organization owner permission required.",
+        )
 
     records = db.query(OrganizationInvitation).filter(
         OrganizationInvitation.organization_id == membership.organization_id
-    ).order_by(OrganizationInvitation.created_at.desc()).all()
+    ).order_by(
+        OrganizationInvitation.created_at.desc()
+    ).all()
 
     return [
         {
@@ -164,41 +218,72 @@ def accept_invitation(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    token_hash = hashlib.sha256(data.token.encode("utf-8")).hexdigest()
+    token_hash = hashlib.sha256(
+        data.token.encode("utf-8")
+    ).hexdigest()
+
     invitation = db.query(OrganizationInvitation).filter(
         OrganizationInvitation.token_hash == token_hash
     ).first()
 
     if invitation is None:
-        raise HTTPException(status_code=404, detail="Invitation is invalid or unavailable.")
+        raise HTTPException(
+            status_code=404,
+            detail="Invitation is invalid or unavailable.",
+        )
+
     if invitation.accepted_at is not None or invitation.revoked_at is not None:
-        raise HTTPException(status_code=409, detail="Invitation has already been used or revoked.")
+        raise HTTPException(
+            status_code=409,
+            detail="Invitation has already been used or revoked.",
+        )
+
     if _utc(invitation.expires_at) <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=410, detail="Invitation has expired.")
+        raise HTTPException(
+            status_code=410,
+            detail="Invitation has expired.",
+        )
+
     if user.email.lower() != invitation.email.lower():
-        raise HTTPException(status_code=403, detail="Sign in with the email address this invitation was sent to.")
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in with the email address this invitation was sent to.",
+        )
 
     existing = db.query(Membership).filter(
         Membership.user_id == user.id,
         Membership.organization_id == invitation.organization_id,
     ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="You are already a member of this organization.")
 
-    # Atomic one-time claim: concurrent acceptance attempts cannot both succeed.
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="You are already a member of this organization.",
+        )
+
+    # Atomic one-time claim:
+    # concurrent acceptance attempts and expired invitations cannot succeed.
+    claim_time = datetime.now(timezone.utc)
+
     claimed = db.execute(
         update(OrganizationInvitation)
         .where(
             OrganizationInvitation.id == invitation.id,
             OrganizationInvitation.accepted_at.is_(None),
             OrganizationInvitation.revoked_at.is_(None),
+            OrganizationInvitation.expires_at > claim_time,
         )
-        .values(accepted_at=datetime.now(timezone.utc))
+        .values(accepted_at=claim_time)
         .execution_options(synchronize_session=False)
     )
+
     if claimed.rowcount != 1:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Invitation has already been used.")
+
+        raise HTTPException(
+            status_code=409,
+            detail="Invitation is no longer available.",
+        )
 
     db.add(
         Membership(
@@ -207,20 +292,26 @@ def accept_invitation(
             role="reviewer",
         )
     )
+
     _audit(
         db,
         "organization.invitation_accepted",
         user.id,
         invitation.organization_id,
         invitation.id,
-        {"email": user.email.lower(), "role": "reviewer"},
+        {
+            "email": user.email.lower(),
+            "role": "reviewer",
+        },
         request,
     )
+
     db.commit()
 
     organization = db.query(Organization).filter(
         Organization.id == invitation.organization_id
     ).first()
+
     return {
         "message": "Invitation accepted.",
         "organization_id": invitation.organization_id,
@@ -235,19 +326,86 @@ def list_members(
     db: Session = Depends(get_db),
 ):
     if membership.role != "owner":
-        raise HTTPException(status_code=403, detail="Organization owner permission required.")
+        raise HTTPException(
+            status_code=403,
+            detail="Organization owner permission required.",
+        )
 
     rows = (
         db.query(Membership, User)
         .join(User, User.id == Membership.user_id)
-        .filter(Membership.organization_id == membership.organization_id)
+        .filter(
+            Membership.organization_id == membership.organization_id
+        )
         .order_by(User.email.asc())
         .all()
     )
+
     return [
-        {"user_id": member.user_id, "email": user.email, "role": member.role}
+        {
+            "user_id": member.user_id,
+            "email": user.email,
+            "role": member.role,
+        }
         for member, user in rows
     ]
+
+@router.delete("/invitations/{invitation_id}", status_code=200)
+def revoke_invitation(
+    invitation_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    membership: Membership = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    if membership.role != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Organization owner permission required.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # Atomically revoke only a pending, unexpired invitation
+    # belonging to the owner's current organization.
+    revoked = db.execute(
+        update(OrganizationInvitation)
+        .where(
+            OrganizationInvitation.id == invitation_id,
+            OrganizationInvitation.organization_id
+            == membership.organization_id,
+            OrganizationInvitation.accepted_at.is_(None),
+            OrganizationInvitation.revoked_at.is_(None),
+            OrganizationInvitation.expires_at > now,
+        )
+        .values(revoked_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+    if revoked.rowcount != 1:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=409,
+            detail="Invitation is no longer available for revocation.",
+        )
+
+    _audit(
+        db,
+        "organization.invitation_revoked",
+        user.id,
+        membership.organization_id,
+        invitation_id,
+        {"revoked_by": user.id},
+        request,
+    )
+
+    db.commit()
+
+    return {
+        "message": "Organization invitation revoked.",
+        "invitation_id": invitation_id,
+    }
 
 
 @router.delete("/members/{user_id}", status_code=200)
@@ -259,20 +417,36 @@ def remove_member(
     db: Session = Depends(get_db),
 ):
     if membership.role != "owner":
-        raise HTTPException(status_code=403, detail="Organization owner permission required.")
+        raise HTTPException(
+            status_code=403,
+            detail="Organization owner permission required.",
+        )
+
     if user_id == user.id:
-        raise HTTPException(status_code=400, detail="You cannot remove your own membership.")
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot remove your own membership.",
+        )
 
     target = db.query(Membership).filter(
         Membership.user_id == user_id,
         Membership.organization_id == membership.organization_id,
     ).first()
+
     if target is None:
-        raise HTTPException(status_code=404, detail="Organization member not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Organization member not found.",
+        )
+
     if target.role == "owner":
-        raise HTTPException(status_code=409, detail="An owner membership cannot be removed through this endpoint.")
+        raise HTTPException(
+            status_code=409,
+            detail="An owner membership cannot be removed through this endpoint.",
+        )
 
     db.delete(target)
+
     _audit(
         db,
         "organization.member_removed",
@@ -282,5 +456,9 @@ def remove_member(
         {"removed_role": target.role},
         request,
     )
+
     db.commit()
-    return {"message": "Organization membership removed."}
+
+    return {
+        "message": "Organization membership removed."
+    }

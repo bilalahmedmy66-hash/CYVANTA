@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Copy, Mail, RefreshCw, ShieldCheck, Users } from "lucide-react";
 import { apiRequest, getSession } from "./api";
 
@@ -19,32 +19,45 @@ export default function OrganizationPage() {
   const [email, setEmail] = useState("");
   const [members, setMembers] = useState([]);
   const [invitations, setInvitations] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [handoff, setHandoff] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const load = useCallback(async () => {
-    if (!isOwner) return;
-    setLoading(true);
-    setError("");
-    try {
-      const [memberRows, invitationRows] = await Promise.all([
-        apiRequest("/organizations/members"),
-        apiRequest("/organizations/invitations")
-      ]);
-      setMembers(Array.isArray(memberRows) ? memberRows : []);
-      setInvitations(Array.isArray(invitationRows) ? invitationRows : []);
-    } catch (err) {
-      setError(err.message || "Unable to load organization membership.");
-    } finally {
-      setLoading(false);
-    }
-  }, [isOwner]);
+  useEffect(() => {
+    if (!isOwner) return undefined;
 
-  useEffect(() => { load(); }, [load, refreshKey]);
+    let active = true;
+
+    async function loadOrganization() {
+      try {
+        const [memberRows, invitationRows] = await Promise.all([
+          apiRequest("/organizations/members"),
+          apiRequest("/organizations/invitations")
+        ]);
+
+        if (!active) return;
+
+        setMembers(Array.isArray(memberRows) ? memberRows : []);
+        setInvitations(Array.isArray(invitationRows) ? invitationRows : []);
+        setError("");
+      } catch (err) {
+        if (active) {
+          setError(err.message || "Unable to load organization membership.");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadOrganization();
+
+    return () => {
+      active = false;
+    };
+  }, [isOwner, refreshKey]);
 
   async function createInvitation(event) {
     event.preventDefault();
@@ -153,7 +166,7 @@ export default function OrganizationPage() {
         </section>
 
         <section className="panel workspace-panel">
-          <div className="panel-head"><div><label>02 / MEMBERSHIP</label><h2>Organization members</h2></div><button className="workspace-refresh" type="button" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}><RefreshCw size={14} /> {loading ? "Refreshing" : "Refresh"}</button></div>
+          <div className="panel-head"><div><label>02 / MEMBERSHIP</label><h2>Organization members</h2></div><button className="workspace-refresh" type="button" onClick={() => { setLoading(true); setRefreshKey((value) => value + 1); }} disabled={loading}><RefreshCw size={14} /> {loading ? "Refreshing" : "Refresh"}</button></div>
           {loading ? <p className="org-muted">Loading organization members...</p> : members.length === 0 ? <div className="workspace-empty"><Users size={22} /><b>No members returned</b><p>The backend returned no organization members.</p></div> : (
             <div className="workspace-table-wrap">
               <table className="workspace-table">

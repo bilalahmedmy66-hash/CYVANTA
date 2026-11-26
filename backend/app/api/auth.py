@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+﻿from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -19,6 +19,10 @@ from app.security.auth import (
 from app.security.dependencies import get_current_user
 from app.core.config import settings
 from app.security.security_signals import record_failed_login_signal
+from app.security.login_rate_limiter import (
+    consume_login_attempt,
+    RateLimitUnavailable,
+)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -114,6 +118,25 @@ def login(
 ):
     email = str(data.email).strip().casefold()
 
+    try:
+        decision = consume_login_attempt(
+            engine=db.get_bind(),
+            ip_address=request.client.host if request.client else None,
+            account_identifier=email,
+            hmac_key=settings.security_event_hmac_key,
+        )
+    except RateLimitUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication is temporarily unavailable.",
+        )
+
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(decision.retry_after)},
+        )
     user = db.query(User).filter(User.email == email).first()
 
     if (
@@ -178,3 +201,6 @@ def list_my_organizations(
         }
         for membership, organization in memberships
     ]
+
+
+

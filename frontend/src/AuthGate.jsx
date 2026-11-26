@@ -17,7 +17,6 @@ export default function AuthGate({ children }) {
   useEffect(() => {
     let active = true;
     if (!getSession()) {
-      setChecking(false);
       return () => { active = false; };
     }
     verifySession()

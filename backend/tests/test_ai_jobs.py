@@ -49,7 +49,14 @@ def register_and_login(client, email, organization_name):
         json={"email": email, "password": "StrongPassphrase123!"},
     )
     assert login.status_code == 200
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    policy = client.put(
+        "/api/v1/ai/external-analysis-policy",
+        headers=headers,
+        json={"external_analysis_enabled": True},
+    )
+    assert policy.status_code == 200, policy.text
+    return headers
 
 
 def test_ai_job_submission_requires_authentication(client):

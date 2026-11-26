@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.ai.schemas import AIJobListResponse, AIJobResponse, AnalysisRequest
+from app.ai.policy import external_analysis_is_enabled
 from app.ai.service import redact_secrets
 from app.database.session import get_db
 from app.models import AIAnalysisJob
@@ -18,6 +19,12 @@ def submit_ai_job(
     db: Session = Depends(get_db),
 ):
     """Create a queued advisory job; processing is handled by a separate worker."""
+    if not external_analysis_is_enabled(db, membership.organization_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="External AI analysis is disabled for this organization.",
+        )
+
     job = AIAnalysisJob(
         organization_id=membership.organization_id,
         submitted_by=membership.user_id,

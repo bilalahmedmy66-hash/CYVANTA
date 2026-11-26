@@ -1,0 +1,138 @@
+﻿import { useCallback, useEffect, useState } from "react";
+import { Brain, RefreshCw, ShieldCheck, Users, Layers3, AlertTriangle } from "lucide-react";
+import { apiRequest } from "./api";
+
+function Metric({ label, value, detail, icon: Icon }) {
+  return (
+    <article className="panel ai-metric">
+      <div className="ai-metric-icon"><Icon size={17} /></div>
+      <span>{label}</span>
+      <strong>{value ?? "—"}</strong>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function Value({ children }) {
+  if (children === null || children === undefined || children === "") return "—";
+  if (Array.isArray(children)) return children.join(", ");
+  return String(children);
+}
+
+export default function AgentIntelligencePage() {
+  const [registry, setRegistry] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadRegistry = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest("/agent-intelligence/registry");
+      setRegistry(result);
+    } catch (requestError) {
+      setError(requestError?.message || "The agent registry could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRegistry();
+  }, [loadRegistry, refreshKey]);
+
+  const summary = registry?.summary || {};
+  const layers = Array.isArray(registry?.layers) ? registry.layers : [];
+  const agents = Array.isArray(registry?.agents) ? registry.agents : [];
+
+  return (
+    <div className="content workspace-content ai-page">
+      <section className="welcome">
+        <div>
+          <label><i /> AGENT INTELLIGENCE</label>
+          <h1>Agent <em>registry.</em></h1>
+          <p>Review registered agent identities, their hierarchy, and the boundaries defined by the agent contract.</p>
+        </div>
+        <button className="workspace-refresh" type="button" onClick={() => setRefreshKey((key) => key + 1)} disabled={loading}>
+          <RefreshCw size={14} /> {loading ? "Loading registry" : "Refresh registry"}
+        </button>
+      </section>
+
+      <div className="ai-safety-note">
+        <ShieldCheck size={16} />
+        <div>
+          <b>Advisory-only registry</b>
+          <p>This view reports registered logical identities. It does not indicate active workers or perform security actions.</p>
+        </div>
+      </div>
+
+      {error && <div className="workspace-error" role="alert"><AlertTriangle size={16} />{error}</div>}
+
+      <section className="ai-metrics">
+        <Metric label="REGISTERED IDENTITIES" value={loading ? "…" : summary.registered_identities} detail="Logical identities in registry" icon={Users} />
+        <Metric label="GLOBAL COORDINATORS" value={loading ? "…" : summary.global_coordinators} detail="Top-level coordination role" icon={Brain} />
+        <Metric label="LAYER COORDINATORS" value={loading ? "…" : summary.layer_coordinators} detail="Layer-level coordination roles" icon={Layers3} />
+        <Metric label="SPECIALISTS" value={loading ? "…" : summary.specialists} detail="Registered specialist identities" icon={Users} />
+      </section>
+
+      <section className="panel workspace-panel">
+        <div className="panel-head">
+          <div><label>01 / HIERARCHY</label><h2>Registered layers</h2></div>
+          <span className="ai-contract">{registry?.contract_version || "CONTRACT —"}</span>
+        </div>
+        {loading ? (
+          <div className="workspace-empty"><Brain size={22} /><b>Loading agent registry</b><p>Retrieving registry metadata for the selected organization.</p></div>
+        ) : layers.length ? (
+          <div className="workspace-table-wrap">
+            <table className="workspace-table">
+              <thead><tr><th>Layer</th><th>Layer name</th><th>Coordinator</th><th>Specialists</th></tr></thead>
+              <tbody>{layers.map((layer) => (
+                <tr key={layer.layer_id}>
+                  <td><Value>{layer.layer_id}</Value></td>
+                  <td><Value>{layer.layer_name}</Value></td>
+                  <td><Value>{layer.coordinator_id}</Value></td>
+                  <td><Value>{layer.specialist_count}</Value></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="workspace-empty"><b>No layer records returned</b><p>The registry response did not include layer entries.</p></div>
+        )}
+      </section>
+
+      <section className="panel workspace-panel">
+        <div className="panel-head">
+          <div><label>02 / IDENTITY CATALOG</label><h2>Agent identities</h2></div>
+          <span className="ai-contract">{loading ? "…" : `${agents.length} records`}</span>
+        </div>
+        {loading ? (
+          <div className="workspace-empty"><b>Loading identities</b><p>Agent records will appear when the registry response is available.</p></div>
+        ) : agents.length ? (
+          <div className="workspace-table-wrap">
+            <table className="workspace-table">
+              <thead><tr><th>Agent ID</th><th>Role</th><th>Layer</th><th>Type</th><th>Status</th><th>Permissions</th></tr></thead>
+              <tbody>{agents.map((agent) => (
+                <tr key={agent.agent_id}>
+                  <td><Value>{agent.agent_id}</Value></td>
+                  <td><Value>{agent.role}</Value></td>
+                  <td><Value>{agent.layer_name || agent.layer_id}</Value></td>
+                  <td><Value>{agent.agent_type}</Value></td>
+                  <td><Value>{agent.status}</Value></td>
+                  <td><Value>{agent.permission_profile}</Value></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="workspace-empty"><b>No agent identities returned</b><p>The registry response did not include agent records.</p></div>
+        )}
+      </section>
+
+      <p className="workspace-data-status">
+        {registry ? `Registry scope: ${registry.registry_scope || "unspecified"} · Metadata only: ${registry.metadata_only === true ? "yes" : "not confirmed"} · Running workers: ${summary.running_workers ?? "not reported"}` : "Registry metadata has not been loaded."}
+      </p>
+    </div>
+  );
+}

@@ -9,6 +9,7 @@ from app.database.base import Base
 from app.database.session import get_db
 from app.ai.schemas import AnalysisResult, Finding
 from app.ai.service import redact_secrets
+from app.models import Membership
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def client():
     engine.dispose()
 
 
-def register_and_login(client, email="ai-test@example.com"):
+def register_and_login(client, email="ai-test@example.com", enable_external=True):
     response = client.post("/api/v1/auth/register", json={
         "email": email,
         "password": "StrongPassphrase123!",
@@ -48,7 +49,15 @@ def register_and_login(client, email="ai-test@example.com"):
         "password": "StrongPassphrase123!",
     })
     assert login.status_code == 200
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    if enable_external:
+        policy = client.put(
+            "/api/v1/ai/external-analysis-policy",
+            headers=headers,
+            json={"external_analysis_enabled": True},
+        )
+        assert policy.status_code == 200, policy.text
+    return headers
 
 
 def test_ai_endpoint_requires_authentication(client):
@@ -166,3 +175,56 @@ def test_ai_provider_failure_does_not_bypass_authentication(client, monkeypatch)
     )
 
     assert response.status_code == 401
+
+def test_ai_endpoint_blocks_external_analysis_without_org_approval(client, monkeypatch):
+    from app.api import ai as ai_api
+
+    provider_called = False
+
+    def fake_analyze(*args):
+        nonlocal provider_called
+        provider_called = True
+        return {
+            "summary": "Test result that must not be returned.",
+            "findings": [],
+            "limitations": [],
+            "requires_human_review": True,
+            "advisory_only": True,
+        }
+
+    monkeypatch.setattr(ai_api, "analyze_with_gemini", fake_analyze)
+    headers = register_and_login(client, enable_external=False)
+
+    response = client.post(
+        "/api/v1/ai/analyze",
+        headers=headers,
+        json={
+            "analysis_type": "security_finding",
+            "evidence_text": "A test server has an unverified outdated configuration.",
+        },
+    )
+
+    assert response.status_code == 403
+    assert provider_called is False
+
+def test_external_analysis_policy_requires_owner_role(client):
+    headers = register_and_login(client, enable_external=False)
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+    try:
+        membership = db.query(Membership).first()
+        assert membership is not None
+        membership.role = "member"
+        db.commit()
+    finally:
+        db_generator.close()
+
+    response = client.put(
+        "/api/v1/ai/external-analysis-policy",
+        headers=headers,
+        json={"external_analysis_enabled": True},
+    )
+
+    assert response.status_code == 403
+

@@ -1,0 +1,274 @@
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  Brain,
+  ChevronRight,
+  Layers3,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Users,
+  X,
+} from "lucide-react";
+import { apiRequest } from "./api";
+
+function Metric({ label, value, detail, icon: Icon }) {
+  return (
+    <article className="panel ai-metric">
+      <div className="ai-metric-icon"><Icon size={17} /></div>
+      <span>{label}</span>
+      <strong>{value ?? "—"}</strong>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function Value({ children }) {
+  if (children === null || children === undefined || children === "") return "—";
+  if (Array.isArray(children)) return children.join(", ");
+  return String(children);
+}
+
+function AgentCard({ agent, eyebrow }) {
+  return (
+    <div className="ai-identity-card">
+      <div className="ai-identity-mark"><Brain size={18} /></div>
+      <div className="ai-identity-copy">
+        <span>{eyebrow}</span>
+        <strong><Value>{agent?.agent_id}</Value></strong>
+        <p><Value>{agent?.role}</Value></p>
+      </div>
+      <span className="ai-contract"><Value>{agent?.status}</Value></span>
+    </div>
+  );
+}
+
+export default function AgentIntelligencePage() {
+  const [registry, setRegistry] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [selectedLayer, setSelectedLayer] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const loadRegistry = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest("/agent-intelligence/registry");
+      setRegistry(result);
+    } catch (requestError) {
+      setError(requestError?.message || "The agent registry could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRegistry();
+  }, [loadRegistry, refreshKey]);
+
+  const summary = registry?.summary || {};
+  const layers = Array.isArray(registry?.layers) ? registry.layers : [];
+  const agents = Array.isArray(registry?.agents) ? registry.agents : [];
+  const globalCoordinator = registry?.global_coordinator;
+
+  const filteredAgents = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return agents.filter((agent) => {
+      const matchesLayer = !selectedLayer || String(agent.layer_id) === selectedLayer;
+      const searchable = [
+        agent.agent_id,
+        agent.role,
+        agent.layer_id,
+        agent.layer_name,
+        agent.agent_type,
+        agent.status,
+        agent.permission_profile,
+        agent.responsibility,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return matchesLayer && (!query || searchable.includes(query));
+    });
+  }, [agents, searchQuery, selectedLayer]);
+
+  const selectedLayerInfo = layers.find((layer) => String(layer.layer_id) === selectedLayer);
+  const selectedAgent = filteredAgents.find(
+    (agent) => String(agent.agent_id) === selectedAgentId
+  );
+
+  return (
+    <div className="content workspace-content ai-page">
+      <section className="welcome">
+        <div>
+          <label><i /> AGENT INTELLIGENCE</label>
+          <h1>Agent <em>registry.</em></h1>
+          <p>Explore the registered coordination hierarchy and inspect agent identities through the read-only registry.</p>
+        </div>
+        <button className="workspace-refresh" type="button" onClick={() => setRefreshKey((key) => key + 1)} disabled={loading}>
+          <RefreshCw size={14} /> {loading ? "Loading registry" : "Refresh registry"}
+        </button>
+      </section>
+
+      <div className="ai-safety-note">
+        <ShieldCheck size={16} />
+        <div>
+          <b>Advisory-only registry</b>
+          <p>These are registered logical identities—not live worker status. This page does not execute agents or perform security actions.</p>
+        </div>
+      </div>
+
+      {error && <div className="workspace-error" role="alert"><AlertTriangle size={16} />{error}</div>}
+
+      <section className="ai-metrics">
+        <Metric label="REGISTERED IDENTITIES" value={loading ? "…" : summary.registered_identities} detail="Logical identities in registry" icon={Users} />
+        <Metric label="GLOBAL COORDINATOR" value={loading ? "…" : summary.global_coordinators} detail="Top-level coordination role" icon={Brain} />
+        <Metric label="LAYER COORDINATORS" value={loading ? "…" : summary.layer_coordinators} detail="Layer-level coordination roles" icon={Layers3} />
+        <Metric label="SPECIALISTS" value={loading ? "…" : summary.specialists} detail="Registered specialist identities" icon={Users} />
+      </section>
+
+      <section className="panel workspace-panel ai-hierarchy-panel">
+        <div className="panel-head">
+          <div><label>01 / COORDINATION MAP</label><h2>Agent hierarchy</h2></div>
+          <span className="ai-contract">{registry?.contract_version || "CONTRACT —"}</span>
+        </div>
+
+        {loading ? (
+          <div className="workspace-empty"><Brain size={22} /><b>Loading hierarchy</b><p>Retrieving registered coordinator and layer metadata.</p></div>
+        ) : (
+          <div className="ai-hierarchy">
+            <div className="ai-global-node">
+              <span className="ai-node-kicker">GLOBAL COORDINATOR</span>
+              <AgentCard agent={globalCoordinator} eyebrow="Top-level registered identity" />
+              <span className="ai-global-caption">Coordinates the logical layer hierarchy</span>
+            </div>
+            <div className="ai-hierarchy-stem" aria-hidden="true" />
+            <div className="ai-layer-grid">
+              {layers.map((layer) => {
+                const active = selectedLayer === String(layer.layer_id);
+                return (
+                  <button
+                    className={`ai-layer-card${active ? " is-selected" : ""}`}
+                    key={layer.layer_id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setSelectedLayer(active ? "" : String(layer.layer_id))}
+                  >
+                    <div className="ai-layer-card-top">
+                      <span className="ai-layer-number">{layer.layer_id}</span>
+                      <span className="ai-layer-count">{layer.specialist_count} specialists</span>
+                    </div>
+                    <strong>{layer.layer_name || `Layer ${layer.layer_id}`}</strong>
+                    <span className="ai-layer-coordinator">Coordinator <b>{layer.coordinator_id || "—"}</b></span>
+                    <span className="ai-layer-action">{active ? "Selected" : "View identities"} <ChevronRight size={14} /></span>
+                  </button>
+                );
+              })}
+            </div>
+            {selectedLayer && (
+              <div className="ai-selection-note">
+                Showing identities for <b>{selectedLayerInfo?.layer_name || `Layer ${selectedLayer}`}</b>.
+                <button type="button" onClick={() => setSelectedLayer("")}>Show all layers <X size={13} /></button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="panel workspace-panel">
+        <div className="panel-head">
+          <div><label>02 / IDENTITY DIRECTORY</label><h2>Registered agents</h2></div>
+          <span className="ai-contract">{loading ? "…" : `${filteredAgents.length} of ${agents.length} records`}</span>
+        </div>
+
+        <div className="ai-directory-controls">
+          <label className="ai-search">
+            <Search size={16} />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search ID, role, layer, type, status…"
+              aria-label="Search registered agents"
+            />
+            {searchQuery && <button type="button" aria-label="Clear search" onClick={() => setSearchQuery("")}><X size={14} /></button>}
+          </label>
+          <button
+            className={`ai-filter-chip${selectedLayer ? " is-active" : ""}`}
+            type="button"
+            onClick={() => setSelectedLayer("")}
+            disabled={!selectedLayer}
+          >
+            {selectedLayer ? `Layer ${selectedLayer} filter active` : "All layers"}
+            {selectedLayer && <X size={13} />}
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="workspace-empty"><b>Loading identities</b><p>Agent records will appear when the registry response is available.</p></div>
+        ) : filteredAgents.length ? (
+          <div className="workspace-table-wrap">
+            <table className="workspace-table">
+              <thead><tr><th>Agent ID</th><th>Role</th><th>Layer</th><th>Type</th><th>Status</th><th>Permissions</th></tr></thead>
+              <tbody>{filteredAgents.map((agent) => (
+                <tr key={agent.agent_id}>
+                  <td>
+                    <button
+                      className="ai-agent-select"
+                      type="button"
+                      aria-expanded={selectedAgentId === String(agent.agent_id)}
+                      onClick={() => setSelectedAgentId((current) =>
+                        current === String(agent.agent_id) ? "" : String(agent.agent_id)
+                      )}
+                    >
+                      <Value>{agent.agent_id}</Value>
+                    </button>
+                  </td>
+                  <td><Value>{agent.role}</Value></td>
+                  <td><Value>{agent.layer_name || agent.layer_id}</Value></td>
+                  <td><Value>{agent.agent_type}</Value></td>
+                  <td><Value>{agent.status}</Value></td>
+                  <td><Value>{agent.permission_profile}</Value></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {selectedAgent && (
+            <section className="ai-agent-detail" aria-label="Selected agent registry details">
+              <div className="ai-agent-detail-head">
+                <div>
+                  <span>SELECTED REGISTRY IDENTITY</span>
+                  <h3><Value>{selectedAgent.agent_id}</Value></h3>
+                </div>
+                <button type="button" onClick={() => setSelectedAgentId("")}>
+                  <X size={14} /> Close details
+                </button>
+              </div>
+              <p className="ai-agent-detail-note">
+                Read-only registry metadata. This selection does not execute or activate an agent.
+              </p>
+              <dl className="ai-agent-detail-grid">
+                <div><dt>Role</dt><dd><Value>{selectedAgent.role}</Value></dd></div>
+                <div><dt>Agent type</dt><dd><Value>{selectedAgent.agent_type}</Value></dd></div>
+                <div><dt>Layer</dt><dd><Value>{selectedAgent.layer_name || selectedAgent.layer_id}</Value></dd></div>
+                <div><dt>Status field</dt><dd><Value>{selectedAgent.status}</Value></dd></div>
+                <div><dt>Permission profile</dt><dd><Value>{selectedAgent.permission_profile}</Value></dd></div>
+                <div><dt>Memory namespace</dt><dd><Value>{selectedAgent.memory_namespace}</Value></dd></div>
+                <div><dt>Coordinator ID</dt><dd><Value>{selectedAgent.coordinator_id}</Value></dd></div>
+                <div><dt>Contract version</dt><dd><Value>{selectedAgent.contract_version}</Value></dd></div>
+                <div className="ai-agent-detail-wide"><dt>Responsibility</dt><dd><Value>{selectedAgent.responsibility}</Value></dd></div>
+                <div className="ai-agent-detail-wide"><dt>Capabilities</dt><dd><Value>{selectedAgent.capabilities}</Value></dd></div>
+              </dl>
+            </section>
+          )}
+        ) : (
+          <div className="workspace-empty"><b>No matching identities</b><p>Try another search term or clear the selected layer filter.</p></div>
+        )}
+      </section>
+
+      <p className="workspace-data-status">
+        {registry ? `Registry scope: ${registry.registry_scope || "unspecified"} · Metadata only: ${registry.metadata_only === true ? "yes" : "not confirmed"} · Running workers: ${summary.running_workers ?? "not reported"}` : "Registry metadata has not been loaded."}
+      </p>
+    </div>
+  );
+}
+

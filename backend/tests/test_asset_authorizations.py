@@ -1198,3 +1198,297 @@ def test_owner_cannot_remove_self_or_another_owner(client):
 
     assert remove_self.status_code == 400
     assert remove_second_owner.status_code == 409
+
+def test_invitation_cannot_be_accepted_if_it_expires_before_atomic_claim(
+    client, monkeypatch
+):
+    from datetime import datetime as RealDateTime, timedelta, timezone
+
+    import app.api.organizations as organizations_module
+    from app.api.organizations import settings
+    from app.models import Membership, OrganizationInvitation, User
+
+    monkeypatch.setattr(settings, "app_env", "test")
+
+    owner_headers = setup_account(client)
+
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={"email": "expiry-reviewer@example.com", "role": "reviewer"},
+    )
+    assert invite_response.status_code == 201, invite_response.text
+
+    invitation_data = invite_response.json()
+    raw_token = invitation_data["invitation_token"]
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client,
+        "expiry-reviewer@example.com",
+        "Expiry Reviewer Personal Organization",
+    )
+
+    before_expiry = RealDateTime.now(timezone.utc)
+    after_expiry = before_expiry + timedelta(seconds=2)
+    invitation_expiry = before_expiry + timedelta(seconds=1)
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+
+    try:
+        invitation = db.query(OrganizationInvitation).filter(
+            OrganizationInvitation.id == invitation_data["id"]
+        ).one()
+
+        invitation.expires_at = invitation_expiry
+        db.commit()
+
+        reviewer = db.query(User).filter(
+            User.email == "expiry-reviewer@example.com"
+        ).one()
+
+        reviewer_id = reviewer.id
+        organization_id = invitation.organization_id
+    finally:
+        db_generator.close()
+
+    class AdvancingClock:
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+
+            if cls.calls == 1:
+                return before_expiry
+
+            return after_expiry
+
+    monkeypatch.setattr(
+        organizations_module,
+        "datetime",
+        AdvancingClock,
+    )
+
+    response = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={"token": raw_token},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Invitation is no longer available."
+    assert AdvancingClock.calls == 2
+
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+
+    try:
+        invitation = db.query(OrganizationInvitation).filter(
+            OrganizationInvitation.id == invitation_data["id"]
+        ).one()
+
+        membership = db.query(Membership).filter(
+            Membership.user_id == reviewer_id,
+            Membership.organization_id == organization_id,
+        ).first()
+
+        assert invitation.accepted_at is None
+        assert membership is None
+    finally:
+        db_generator.close()
+
+def test_removed_reviewer_immediately_loses_organization_access(
+    client, monkeypatch
+):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+
+    owner_headers = setup_account(client)
+    asset_id = setup_asset(client, owner_headers)
+
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={
+            "email": "removed-reviewer@example.com",
+            "role": "reviewer",
+        },
+    )
+    assert invite_response.status_code == 201, invite_response.text
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client,
+        "removed-reviewer@example.com",
+        "Removed Reviewer Personal Organization",
+    )
+
+    accepted = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={
+            "token": invite_response.json()["invitation_token"],
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    organization_id = accepted.json()["organization_id"]
+    reviewer_headers["X-Organization-ID"] = organization_id
+
+    # Confirm the reviewer can access organization assets before removal.
+    before_removal = client.get(
+        "/api/v1/assets",
+        headers=reviewer_headers,
+    )
+    assert before_removal.status_code == 200, before_removal.text
+    assert any(
+        item["id"] == asset_id
+        for item in before_removal.json()
+    )
+
+    reviewer_profile = client.get(
+        "/api/v1/auth/me",
+        headers=reviewer_headers,
+    )
+    assert reviewer_profile.status_code == 200, reviewer_profile.text
+    reviewer_id = reviewer_profile.json()["id"]
+
+    # Owner removes the reviewer from the organization.
+    removal = client.delete(
+        f"/api/v1/organizations/members/{reviewer_id}",
+        headers=owner_headers,
+    )
+    assert removal.status_code == 200, removal.text
+
+    # The JWT remains valid, but organization membership is gone.
+    still_authenticated = client.get(
+        "/api/v1/auth/me",
+        headers=reviewer_headers,
+    )
+    assert still_authenticated.status_code == 200, still_authenticated.text
+
+    after_removal = client.get(
+        "/api/v1/assets",
+        headers=reviewer_headers,
+    )
+    assert after_removal.status_code == 403, after_removal.text
+
+def test_owner_can_revoke_pending_invitation_and_prevent_acceptance(
+    client, monkeypatch
+):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+
+    owner_headers = setup_account(client)
+
+    invite_response = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={
+            "email": "revoked-user@example.com",
+            "role": "reviewer",
+        },
+    )
+    assert invite_response.status_code == 201, invite_response.text
+
+    invitation = invite_response.json()
+
+    invited_headers = _register_and_login_reviewer_invitee(
+        client,
+        "revoked-user@example.com",
+        "Revoked User Personal Organization",
+    )
+
+    revoked = client.delete(
+        f"/api/v1/organizations/invitations/{invitation['id']}",
+        headers=owner_headers,
+    )
+
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["invitation_id"] == invitation["id"]
+
+    # The invitation should now be listed as revoked.
+    invitations = client.get(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+    )
+    assert invitations.status_code == 200, invitations.text
+
+    matching = [
+        item for item in invitations.json()
+        if item["id"] == invitation["id"]
+    ]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "revoked"
+    assert matching[0]["revoked_at"] is not None
+
+    # The invited user must not be able to accept a revoked invitation.
+    acceptance = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=invited_headers,
+        json={"token": invitation["invitation_token"]},
+    )
+    assert acceptance.status_code == 409, acceptance.text
+
+    # A second revocation must also be rejected.
+    repeated = client.delete(
+        f"/api/v1/organizations/invitations/{invitation['id']}",
+        headers=owner_headers,
+    )
+    assert repeated.status_code == 409, repeated.text
+
+
+def test_reviewer_cannot_revoke_an_organization_invitation(
+    client, monkeypatch
+):
+    from app.api.organizations import settings
+
+    monkeypatch.setattr(settings, "app_env", "test")
+
+    owner_headers = setup_account(client)
+
+    reviewer_invite = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={
+            "email": "authorized-reviewer@example.com",
+            "role": "reviewer",
+        },
+    )
+    assert reviewer_invite.status_code == 201, reviewer_invite.text
+
+    target_invite = client.post(
+        "/api/v1/organizations/invitations",
+        headers=owner_headers,
+        json={
+            "email": "another-user@example.com",
+            "role": "reviewer",
+        },
+    )
+    assert target_invite.status_code == 201, target_invite.text
+
+    reviewer_headers = _register_and_login_reviewer_invitee(
+        client,
+        "authorized-reviewer@example.com",
+        "Authorized Reviewer Personal Organization",
+    )
+
+    accepted = client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=reviewer_headers,
+        json={
+            "token": reviewer_invite.json()["invitation_token"],
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    reviewer_headers["X-Organization-ID"] = accepted.json()["organization_id"]
+
+    attempt = client.delete(
+        f"/api/v1/organizations/invitations/{target_invite.json()['id']}",
+        headers=reviewer_headers,
+    )
+
+    assert attempt.status_code == 403, attempt.text

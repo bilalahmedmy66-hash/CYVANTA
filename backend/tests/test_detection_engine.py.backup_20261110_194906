@@ -1,0 +1,222 @@
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database.base import Base
+from app.models import SecuritySignal
+from app.security.detection_engine import (
+    DetectionThresholds,
+    detect_failed_login_patterns,
+)
+from app.security.security_signals import FAILED_LOGIN_EVENT
+
+
+@pytest.fixture
+def db():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    Base.metadata.create_all(bind=engine)
+
+    TestingSession = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+    )
+
+    session = TestingSession()
+
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+@pytest.fixture
+def fixed_now():
+    return datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def add_signal(
+    db,
+    created_at,
+    source_ip="192.0.2.10",
+    fingerprint="test-fingerprint",
+    event_type=FAILED_LOGIN_EVENT,
+):
+    signal = SecuritySignal(
+        event_type=event_type,
+        account_fingerprint=fingerprint,
+        source_ip=source_ip,
+        details={"signal_source": "authentication"},
+        created_at=created_at,
+    )
+    db.add(signal)
+    db.flush()
+    return signal
+
+
+def test_ip_burst_detected(db, fixed_now):
+    for _ in range(10):
+        add_signal(db, fixed_now - timedelta(minutes=2))
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert any(
+        item.rule_id == "AUTH_IP_BURST"
+        for item in findings
+    )
+
+
+def test_ip_burst_below_threshold_not_detected(db, fixed_now):
+    for _ in range(9):
+        add_signal(db, fixed_now - timedelta(minutes=2))
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert not any(
+        item.rule_id == "AUTH_IP_BURST"
+        for item in findings
+    )
+
+
+def test_account_burst_detected(db, fixed_now):
+    for _ in range(10):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=2),
+            source_ip=None,
+            fingerprint="account-123",
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert any(
+        item.rule_id == "AUTH_ACCOUNT_BURST"
+        for item in findings
+    )
+
+
+def test_account_rule_skips_missing_fingerprints(db, fixed_now):
+    for _ in range(15):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=2),
+            fingerprint=None,
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert not any(
+        item.rule_id == "AUTH_ACCOUNT_BURST"
+        for item in findings
+    )
+
+
+def test_distributed_attempt_detected(db, fixed_now):
+    for index in range(5):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=3),
+            source_ip=f"192.0.2.{index + 1}",
+            fingerprint="shared-account",
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert any(
+        item.rule_id == "AUTH_DISTRIBUTED_ATTEMPT"
+        for item in findings
+    )
+
+
+def test_distributed_attempt_below_ip_threshold(db, fixed_now):
+    for index in range(4):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=3),
+            source_ip=f"192.0.2.{index + 1}",
+            fingerprint="shared-account",
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert not any(
+        item.rule_id == "AUTH_DISTRIBUTED_ATTEMPT"
+        for item in findings
+    )
+
+
+def test_old_signals_are_ignored(db, fixed_now):
+    for _ in range(10):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=6),
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert not any(
+        item.rule_id == "AUTH_IP_BURST"
+        for item in findings
+    )
+
+
+def test_future_signals_are_ignored(db, fixed_now):
+    for _ in range(10):
+        add_signal(
+            db,
+            fixed_now + timedelta(minutes=1),
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert findings == []
+
+
+def test_other_event_types_are_ignored(db, fixed_now):
+    for _ in range(10):
+        add_signal(
+            db,
+            fixed_now - timedelta(minutes=1),
+            event_type="some.other.event",
+        )
+
+    findings = detect_failed_login_patterns(db, now=fixed_now)
+
+    assert findings == []
+
+
+def test_invalid_thresholds_are_rejected(db, fixed_now):
+    thresholds = DetectionThresholds(
+        ip_burst_attempts=0,
+    )
+
+    with pytest.raises(ValueError):
+        detect_failed_login_patterns(
+            db,
+            now=fixed_now,
+            thresholds=thresholds,
+        )
+
+
+def test_detection_does_not_modify_signals(db, fixed_now):
+    for _ in range(10):
+        add_signal(db, fixed_now - timedelta(minutes=2))
+
+    before_count = db.query(SecuritySignal).count()
+
+    detect_failed_login_patterns(db, now=fixed_now)
+
+    after_count = db.query(SecuritySignal).count()
+
+    assert before_count == after_count == 10

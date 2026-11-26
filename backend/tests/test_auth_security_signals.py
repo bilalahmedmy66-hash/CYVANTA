@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.api.auth as auth_module
 import app.main as main_module
 import app.database.session as session_module
 
@@ -13,6 +14,9 @@ from app.database.base import Base
 from app.database.session import get_db
 from app.models import SecuritySignal, User
 from app.security.auth import hash_password
+
+
+TEST_HMAC_KEY = "TEST_ONLY_CYVANTA_AUTH_HMAC_KEY_2026_32_BYTES_MINIMUM"
 
 
 @pytest.fixture
@@ -43,7 +47,7 @@ def auth_client(monkeypatch):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("192.0.2.10", 50000)) as client:
         yield client, TestingSessionLocal
 
     app.dependency_overrides.clear()
@@ -69,8 +73,13 @@ def get_signals(session_factory):
         ).scalars().all()
 
 
-def test_unknown_account_records_failed_login_signal(auth_client):
+def test_unknown_account_records_failed_login_signal(auth_client, monkeypatch):
     client, session_factory = auth_client
+    monkeypatch.setattr(
+        auth_module.settings,
+        "security_event_hmac_key",
+        TEST_HMAC_KEY,
+    )
 
     response = client.post(
         "/api/v1/auth/login",
@@ -87,7 +96,8 @@ def test_unknown_account_records_failed_login_signal(auth_client):
 
     assert len(signals) == 1
     assert signals[0].event_type == "authentication.login_failed"
-    assert signals[0].account_fingerprint is None
+    assert signals[0].account_fingerprint is not None
+    assert len(signals[0].account_fingerprint) == 64
     assert "unknown@example.com" not in str(signals[0].details)
 
 
@@ -188,3 +198,80 @@ def test_failed_login_normalizes_email_for_signal(auth_client):
 
     assert len(signals) == 1
     assert signals[0].event_type == "authentication.login_failed"
+
+
+
+
+def test_login_rate_limit_returns_429_and_retry_after(auth_client, monkeypatch):
+    client, _ = auth_client
+
+    monkeypatch.setattr(
+        auth_module.settings,
+        "security_event_hmac_key",
+        TEST_HMAC_KEY,
+    )
+
+    responses = []
+
+    for _ in range(6):
+        responses.append(
+            client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": "rate-limit@example.com",
+                    "password": "WrongPassword123!",
+                },
+            )
+        )
+
+    assert [response.status_code for response in responses] == [
+        401, 401, 401, 401, 401, 429
+    ]
+
+    blocked_response = responses[-1]
+
+    assert blocked_response.json()["detail"] == (
+        "Too many login attempts. Please try again later."
+    )
+    assert int(blocked_response.headers["Retry-After"]) > 0
+
+
+def test_login_fails_closed_when_rate_limit_storage_is_unavailable(
+    auth_client,
+    monkeypatch,
+):
+    client, _ = auth_client
+
+    def fail_rate_limit(**kwargs):
+        raise auth_module.RateLimitUnavailable(
+            "Simulated rate-limit storage failure."
+        )
+
+    def password_verification_must_not_run(*args, **kwargs):
+        raise AssertionError(
+            "Password verification ran despite rate-limit failure."
+        )
+
+    monkeypatch.setattr(
+        auth_module,
+        "consume_login_attempt",
+        fail_rate_limit,
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "verify_password",
+        password_verification_must_not_run,
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": "storage-failure@example.com",
+            "password": "StrongPassphrase123!",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Authentication is temporarily unavailable."
+    )

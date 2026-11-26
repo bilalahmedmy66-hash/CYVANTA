@@ -191,15 +191,14 @@ export default function WorkspacePage({ active }) {
       if (live) setErrors((previous) => ({ ...previous, page: error?.message || "Unexpected workspace loading error." }));
     });
     return () => { live = false; };
-  }, [active, refreshKey]);
-
-  const refresh = (
-    <button className="workspace-refresh" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
-      <RefreshCw size={14}/> {loading ? "Refreshing" : "Refresh data"}
-    </button>
-  );
+  }, [activeKey, refreshKey]);
 
   const content = useMemo(() => {
+    const refresh = (
+      <button className="workspace-refresh" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}>
+        <RefreshCw size={14}/> {loading ? "Refreshing" : "Refresh data"}
+      </button>
+    );
     if (activeKey === "attack surface") return <>
       <div className="workspace-intro"><Target/><div><b>Registered assets</b><p>Assets returned by the CYVANTA backend. Only assets registered in your organization are shown.</p></div></div>
       <ErrorNotice message={errors.assets}/>
@@ -285,7 +284,7 @@ export default function WorkspacePage({ active }) {
       </Panel>
     </>;
     return null;
-  }, [active, assets, authorizations, missions, executions, missionActions, events, loading, errors, refresh, canReviewAuthorizations]);
+  }, [activeKey, assets, authorizations, missions, executions, missionActions, events, loading, errors, canReviewAuthorizations]);
 
   return (
     <div className="content workspace-content">

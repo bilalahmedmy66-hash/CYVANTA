@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,9 +12,12 @@ from app.database.migrations import (
     ensure_security_signals_migrations,
     ensure_platform_detection_migrations,
     ensure_simulation_dispatch_migrations,
+    ensure_audit_log_migrations,
+    ensure_login_rate_limit_migrations,
+    ensure_ai_external_analysis_policy_migrations,
 )
 from app import models
-from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations, organizations, intelligence_graph, ai, ai_jobs, platform_emergency_stops, platform_detection_findings
+from app.api import auth, assets, missions, executions, emergency_stops, asset_authorizations, organizations, intelligence_graph, ai, ai_jobs, platform_emergency_stops, platform_detection_findings, agent_intelligence
 
 
 @asynccontextmanager
@@ -25,6 +28,9 @@ async def lifespan(app: FastAPI):
         ensure_security_signals_migrations(engine)
         ensure_platform_detection_migrations(engine)
         ensure_simulation_dispatch_migrations(engine)
+        ensure_audit_log_migrations(engine)
+        ensure_login_rate_limit_migrations(engine)
+        ensure_ai_external_analysis_policy_migrations(engine)
         yield
 
 
@@ -54,6 +60,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(organizations.router, prefix="/api/v1")
 app.include_router(intelligence_graph.router, prefix="/api/v1")
+app.include_router(agent_intelligence.router, prefix="/api/v1")
 app.include_router(ai.router, prefix="/api/v1")
 app.include_router(ai_jobs.router, prefix="/api/v1")
 app.include_router(assets.router, prefix="/api/v1")
@@ -90,6 +97,7 @@ def system_info():
         "version": settings.app_version,
         "environment": settings.app_env,
     }
+
 
 
 

@@ -1,0 +1,287 @@
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import ReactFlow, {
+  Background,
+  Controls,
+  MiniMap,
+  Handle,
+  Position,
+  useEdgesState,
+  useNodesState,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { AlertTriangle, Database, RefreshCw, ShieldCheck } from "lucide-react";
+import { apiRequest } from "./api";
+
+const TYPE_ORDER = [
+  "organization",
+  "member",
+  "asset",
+  "authorization",
+  "authorization_event",
+  "mission",
+  "action",
+  "approval",
+  "execution",
+  "execution_event",
+];
+
+const TYPE_LABELS = {
+  organization: "ORGANIZATION",
+  member: "MEMBER",
+  asset: "ASSET",
+  authorization: "AUTHORIZATION",
+  authorization_event: "AUTH EVENT",
+  mission: "MISSION",
+  action: "ACTION",
+  approval: "APPROVAL",
+  execution: "EXECUTION RECORD",
+  execution_event: "EXECUTION EVENT",
+};
+
+function layoutGraph(rawNodes, rawEdges) {
+  const validIds = new Set(rawNodes.map((node) => node.id));
+  const grouped = new Map(TYPE_ORDER.map((type) => [type, []]));
+  const unknown = [];
+
+  rawNodes.forEach((node) => {
+    if (grouped.has(node.type)) grouped.get(node.type).push(node);
+    else unknown.push(node);
+  });
+
+  const nodes = [];
+  const positions = new Map();
+  let column = 0;
+
+  TYPE_ORDER.forEach((type) => {
+    const items = grouped.get(type);
+    if (!items.length) return;
+    items.forEach((node, index) => {
+      const position = { x: column * 270, y: index * 132 };
+      positions.set(node.id, position);
+      nodes.push({
+        id: node.id,
+        type: "cyvanta",
+        position,
+        data: {
+          label: node.label || TYPE_LABELS[type] || type,
+          entityType: node.type,
+          typeLabel: TYPE_LABELS[type] || String(type).toUpperCase(),
+          status: node.status || "",
+          metadata: node.metadata || {},
+        },
+      });
+    });
+    column += 1;
+  });
+
+  unknown.forEach((node, index) => {
+    const position = { x: column * 270, y: index * 132 };
+    positions.set(node.id, position);
+    nodes.push({
+      id: node.id,
+      type: "cyvanta",
+      position,
+      data: {
+        label: node.label || node.type || "Record",
+        entityType: node.type || "record",
+        typeLabel: String(node.type || "record").toUpperCase(),
+        status: node.status || "",
+        metadata: node.metadata || {},
+      },
+    });
+  });
+
+  const edges = rawEdges
+    .filter((edge) => validIds.has(edge.source) && validIds.has(edge.target))
+    .map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      label: edge.relationship?.replaceAll("_", " ") || "",
+      type: "smoothstep",
+      animated: false,
+      style: { stroke: "rgba(91, 211, 231, .42)", strokeWidth: 1.5 },
+      labelStyle: { fill: "#aebbd5", fontSize: 9, fontWeight: 600 },
+      labelBgStyle: { fill: "#11152b", fillOpacity: 0.92 },
+      labelBgPadding: [5, 3],
+    }));
+
+  return { nodes, edges };
+}
+
+function GraphNode({ data, selected }) {
+  return (
+    <div className={`cy-graph-node cy-graph-node-${data.entityType}${selected ? " selected" : ""}`}>
+      <Handle type="target" position={Position.Left} />
+      <div className="cy-graph-node-type">{data.typeLabel}</div>
+      <div className="cy-graph-node-label" title={data.label}>{data.label}</div>
+      {data.status ? <div className="cy-graph-node-status">{data.status}</div> : null}
+      <Handle type="source" position={Position.Right} />
+    </div>
+  );
+}
+
+const nodeTypes = { cyvanta: GraphNode };
+
+function DetailValue({ value }) {
+  if (value === null || value === undefined || value === "") return <span>—</span>;
+  if (typeof value === "boolean") return <span>{value ? "Yes" : "No"}</span>;
+  if (typeof value === "object") return <pre>{JSON.stringify(value, null, 2)}</pre>;
+  return <span>{String(value)}</span>;
+}
+
+export default function IntelligenceGraph() {
+  const [payload, setPayload] = useState(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadGraph = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await apiRequest("/intelligence-graph");
+      if (!result || !Array.isArray(result.nodes) || !Array.isArray(result.edges)) {
+        throw new Error("The graph API returned an unexpected response structure.");
+      }
+      const laidOut = layoutGraph(result.nodes, result.edges);
+      setPayload(result);
+      setNodes(laidOut.nodes);
+      setEdges(laidOut.edges);
+      setSelected(null);
+    } catch (loadError) {
+      setError(loadError?.message || "Unable to load the organization intelligence graph.");
+      setPayload(null);
+      setNodes([]);
+      setEdges([]);
+      setSelected(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [setEdges, setNodes]);
+
+  useEffect(() => {
+    loadGraph();
+  }, [loadGraph]);
+
+  const selectedNode = useMemo(
+    () => selected ? nodes.find((node) => node.id === selected) || null : null,
+    [nodes, selected]
+  );
+
+  const summary = payload?.summary || {};
+  const hasGraph = nodes.length > 0;
+
+  return (
+    <div className="cy-graph-shell">
+      <div className="cy-graph-toolbar">
+        <div className="cy-graph-status">
+          <span className="cy-graph-live-dot" />
+          <span>{loading ? "SYNCING ORGANIZATION GRAPH" : error ? "GRAPH UNAVAILABLE" : "ORGANIZATION GRAPH"}</span>
+          {payload?.organization_id ? <small>ORG {String(payload.organization_id).slice(0, 8)}</small> : null}
+        </div>
+        <button className="workspace-refresh" onClick={loadGraph} disabled={loading}>
+          <RefreshCw size={14} className={loading ? "cy-graph-spin" : ""} />
+          {loading ? "Loading" : "Refresh graph"}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="cy-graph-message cy-graph-error">
+          <AlertTriangle size={17} />
+          <div><b>Graph data could not be loaded</b><p>{error}</p><small>Check that the backend is running and that your session has access to the active organization.</small></div>
+        </div>
+      ) : null}
+
+      {!error && !loading && !hasGraph ? (
+        <div className="cy-graph-message">
+          <Database size={22} />
+          <b>No graph records returned</b>
+          <p>The backend returned no nodes for this organization. CYVANTA will not generate sample entities or relationships.</p>
+        </div>
+      ) : null}
+
+      {hasGraph ? (
+        <>
+          <div className="cy-graph-summary">
+            <div><span>NODES</span><b>{summary.nodes ?? nodes.length}</b></div>
+            <div><span>RELATIONSHIPS</span><b>{summary.edges ?? edges.length}</b></div>
+            <div><span>ASSETS</span><b>{summary.assets ?? 0}</b></div>
+            <div><span>AUTHORIZATIONS</span><b>{summary.authorizations ?? 0}</b></div>
+            <div><span>MISSIONS</span><b>{summary.missions ?? 0}</b></div>
+            <div><span>EXECUTION RECORDS</span><b>{summary.executions ?? 0}</b></div>
+          </div>
+          <div className="cy-graph-workspace">
+            <div className="cy-graph-canvas">
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={nodeTypes}
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onNodeClick={(_, node) => setSelected(node.id)}
+                onPaneClick={() => setSelected(null)}
+                fitView
+                fitViewOptions={{ padding: 0.2, maxZoom: 1.15 }}
+                minZoom={0.12}
+                maxZoom={1.8}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background color="rgba(127, 151, 190, .15)" gap={22} size={1} />
+                <Controls />
+                <MiniMap
+                  pannable
+                  zoomable
+                  nodeColor={(node) => {
+                    const colors = {
+                      organization: "#8b7cff", member: "#60a5fa", asset: "#22d3ee",
+                      authorization: "#34d399", authorization_event: "#6ee7b7",
+                      mission: "#a78bfa", action: "#fbbf24", approval: "#4ade80",
+                      execution: "#fb923c", execution_event: "#f97316",
+                    };
+                    return colors[node.data?.entityType] || "#94a3b8";
+                  }}
+                  maskColor="rgba(8, 11, 27, .72)"
+                />
+              </ReactFlow>
+            </div>
+            <aside className="cy-graph-inspector">
+              <div className="cy-graph-inspector-head">
+                <ShieldCheck size={16} />
+                <span>ENTITY INSPECTOR</span>
+              </div>
+              {selectedNode ? (
+                <>
+                  <div className="cy-graph-inspector-type">{selectedNode.data.typeLabel}</div>
+                  <h3>{selectedNode.data.label}</h3>
+                  {selectedNode.data.status ? <div className="cy-graph-inspector-status">{selectedNode.data.status}</div> : null}
+                  <div className="cy-graph-meta-list">
+                    {Object.entries(selectedNode.data.metadata || {}).map(([key, value]) => (
+                      <div className="cy-graph-meta-row" key={key}>
+                        <span>{key.replaceAll("_", " ")}</span>
+                        <DetailValue value={value} />
+                      </div>
+                    ))}
+                  </div>
+                  <small className="cy-graph-node-id">{selectedNode.id}</small>
+                </>
+              ) : (
+                <div className="cy-graph-inspector-empty">
+                  <Database size={20} />
+                  <b>Select a node</b>
+                  <p>Choose an entity in the graph to inspect the fields returned by the backend.</p>
+                </div>
+              )}
+            </aside>
+          </div>
+          <div className="cy-graph-footnote">
+            <span>READ-ONLY RELATIONSHIP VIEW</span>
+            <span>Only backend-returned nodes and relationships are displayed. Planning-only missions and queued records are not represented as active security operations.</span>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
